@@ -1,0 +1,17 @@
+pandas
+alpha_vantage
+yfinance
+investpy
+fredapi
+finance-datareader
+pykrx
+ipykernel
+jupyterlab
+matplotlib
+seaborn
+jupyter
+numpy
+dart-fss
+backtrader
+uuid7
+pycryptodome

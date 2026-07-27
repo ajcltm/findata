@@ -1,0 +1,9 @@
+# .dockerignore 파일
+.git
+__pycache__
+*.pyc
+.venv
+.vscode
+*.db
+data/
+logs/

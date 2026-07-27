@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(python:*)",
+      "Bash(del \"f:\\\\KIM\\\\020_Project\\\\260207.010_금융데이터\\\\resources\\\\kis\\\\_output.txt\")",
+      "Bash(del \"f:\\\\KIM\\\\020_Project\\\\260207.010_금융데이터\\\\resources\\\\kis\\\\_output_readable.txt\")"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "files.exclude": {
+    "**/__pycache__/": true,
+    "**/.ipynb_checkpoints/":true,
+    "**/*.pyc": true,
+    "**/*.pyo": true,
+    "**/*.egg-info": true
+  }
+}
