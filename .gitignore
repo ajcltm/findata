@@ -1,3 +1,16 @@
+# 1. 모든 파일 및 모든 하위 디렉토리/파일을 통째로 제외
+*
+
+# 2. .gitignore 자체와 src 디렉토리 '구조' 및 내부 파일 허용
+!.gitignore
+!/src/
+!/src/**
+
+# --------------------------------------------------
+# 아래에 적어두신 Python 규칙들(__pycache__, .egg-info, *config*.py 등)에
+# 걸리는 파일들은 src 안쪽에 있더라도 '자동 제외'됩니다.
+# --------------------------------------------------
+
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template
 # Byte-compiled / optimized / DLL files
@@ -150,5 +163,9 @@ crashlytics.properties
 crashlytics-build.properties
 fabric.properties
 
+# 3. src 내부라도 제외해야 하는 보안/설정/토큰 파일 확실히 추가
 **/*config*.py
-
+data/
+*.db
+*.json          # token.json 등 모든 JSON 인증 파일 제외
+token.json
