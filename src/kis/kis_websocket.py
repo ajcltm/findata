@@ -1,305 +1,406 @@
-from numpy import random
-import websocket                 # pip install websocket-client
+"""
+KIS 실시간 시세 수신기 (개선판)
+
+구조:
+    websocket ──> _recv_loop ──> asyncio.Queue ──> _pump ──> queue.Queue (recording)
+                  (얇게 유지)     (백프레셔)                 queue.Queue (trading)
+
+핵심 개선:
+  1. 세션 단위 재연결 + 자동 재구독 (지수 백오프)
+  2. PINGPONG 애플리케이션 레벨 처리 (+ ping_interval=None)
+  3. sleep 대신 구독 ACK 대기 (Future, 타임아웃 시 경고 후 진행)
+  4. recv 루프는 수신만 담당, 파싱/분배는 분리
+  5. 큐 백프레셔 + 드롭 정책
+  6. simul_mode를 별도 프로듀서로 분리
+  7. sentinel 기반 스레드 정상 종료
+"""
+
+from __future__ import annotations
+
+import asyncio
 import json
-import requests
-import datetime
-import pandas as pd
-from kis import kis_api
-from kis import kis_config
-import threading
-from queue import Empty, Queue, Full
-import time
-from collections import deque
-import pandas as pd
-import sqlite3
+import logging
+import queue
 import random
-from strategy import test_st
-import os
-from src.kis.mvc import kis_controller
+import time
+from dataclasses import dataclass
+from typing import Sequence
+
+import websockets
+from websockets.exceptions import ConnectionClosed
+
+# 스레드 컨슈머 종료 신호. recording/trading 루프에서 이 값을 받으면 break.
+SENTINEL = object()
 
 
-# ──────────────────────────────────────
-# 수신 데이터 파싱
-# ──────────────────────────────────────
-def parse_execution(data_str):
-    """체결가 데이터 파싱"""
-    f = data_str.split("^")
-    now = datetime.datetime.now().isoformat(timespec="seconds")
-    data = [{'datetime' : now, 'stock_code':f[0], 'price':f[2], 'volume': f[12], 'total_tr_value':f[13], 'change':f[4], 'pct_change':f[5]}]
-    return data
+@dataclass(frozen=True)
+class Subscription:
+    """구독 단위. tr_id + tr_key 조합이 ACK 매칭 키가 된다."""
+    tr_id: str
+    tr_key: str
 
-def parse_orderbook(data_str):
-    """호가 데이터 파싱"""
-    f = data_str.split("^")
-    now = datetime.datetime.now().isoformat(timespec="seconds")
-    code = f[0]
-    data = []
-    for i in range(10):
-        data.append({'datetime' : now, 'stock_code':code, 'level': f'ask{i+1}', 'price' : f[3 + i], 'qty' : f[23 + i]}) # 매도호가 매도잔량
-        data.append({'datetime' : now, 'stock_code':code, 'level': f'bid{i+1}', 'price' : f[13 + i], 'qty' : f[33 + i]}) # 매수호가 매수잔량
-    return data
-
-# ──────────────────────────────────────
-# WebSocket 콜백 함수들
-# ──────────────────────────────────────
-
-class KisEngine:
-
-    def __init__(self, price_book=None, order_book=None):
-        self.price_book = price_book # 체결가
-        self.order_book = order_book # 호가
-        self.APPROVAL_KEY = self.get_approval_key()
-
-        self.save_q = Queue(maxsize=100_000)
-
-        self._latest_lock = threading.Lock()
-        self._latest_tick = None
-
-        self._stop = threading.Event()
-        self.tick_event = threading.Event()
-        self.strategy = None
-        self.window = deque(maxlen=200)
-
-        # --- SHOW(모니터링) ---
-        self.show_enabled = threading.Event()   # 켜짐/꺼짐 토글
-        self.show_stop = threading.Event()
-        self.show_interval = 0.5  # 화면 갱신 주기(초)
-
-        self._stats_lock = threading.Lock()
-        self._stats = {
-            "total_msgs": 0,
-            "last_msg_time": None,
-            "last_tr_id": None,
-            "last_code": None,
-            "last_price": None,
-            "last_kind": None,  # "tick" / "orderbook"
-        }
+    @property
+    def ack_key(self) -> tuple[str, str]:
+        return (self.tr_id, self.tr_key)
 
 
-        self.event_q = Queue(maxsize=200_000)
-        
+@dataclass(frozen=True)
+class Tick:
+    """다운스트림으로 넘기는 최소 단위. 상세 파싱은 컨슈머에게 위임."""
+    tr_id: str          # H0STCNT0 / H0STASP0 / H0STCNI0 ...
+    count: int          # 데이터 건수
+    payload: str        # ^ 구분 원본 바디
+    encrypted: bool
 
-    def on_message(self, ws, message):
-        """서버에서 메시지가 올 때마다 호출되는 함수"""
-        
-        # ① JSON 형태인지 확인 (구독응답, PINGPONG 등)
-        if message[0] in ('{', '['):
-            data = json.loads(message)
-            
-            # PINGPONG 메시지면 그대로 돌려보냄 (연결 유지용)
-            if data.get("header", {}).get("tr_id") == "PINGPONG":
-                ws.send(message)                # 서버에게 PONG 응답
-                print("[PINGPONG] 연결 유지 신호 전송")
-                if not self.test_mode:
-                    return
-            
-            # 구독 응답 메시지
-            print(f"[응답] {data.get('header', {}).get('tr_id', '')} - "
-                f"{data.get('body', {}).get('msg1', '')}")
-            if not self.test_mode:
-                    return
 
-        if self.test_mode:
-            parsed_data = self.export_test_data()  # 테스트용 더미 데이터 생성
-        else:
-            # ② 문자열 형태 → 실시간 데이터
-            # 형식: "암호화여부|tr_id|건수|데이터"
-            parts = message.split("|")              # "|"로 분리
-            encrypt_flag = parts[0]                 # 0: 평문, 1: 암호화
-            tr_id = parts[1]                        # 거래 ID
-            data_count = parts[2]                   # 데이터 건수
-            raw_data = parts[3]                     # 실제 데이터 ("^"로 구분)
+class KisFeed:
+    # ── 튜닝 파라미터 ────────────────────────────────────────────
+    ACK_TIMEOUT = 3.0        # 구독 응답 대기 한도(초)
+    SUBSCRIBE_GAP = 0.05     # ACK를 기다리므로 rate limit 여유분만
+    BASE_BACKOFF = 1.0
+    MAX_BACKOFF = 30.0
+    MAX_SUBSCRIPTIONS = 40   # ⚠️ 계정 등급별로 다름. 반드시 본인 계정 기준으로 확인.
+    MAX_CONSECUTIVE_BAD = 20 # 연속 폐기 한도. 넘으면 프로토콜 이상으로 보고 재연결
+    MAX_FRAME_BYTES = 1 << 20
+    BAD_LOG_INTERVAL = 1.0   # 같은 종류 오류는 초당 1건만 로깅 (디스크 보호)
 
-            if tr_id == "H0STCNT0":                # 체결가 데이터
-                parsed_data = parse_execution(raw_data)
-                #print(parsed_data)
-            elif tr_id == "H0STASP0":              # 호가 데이터
-                parsed_data = parse_orderbook(raw_data)
-                #print(pd.DataFrame(parsed_data).sort_values(by="price", ascending=False))
+    def __init__(
+        self,
+        *,
+        ws_url: str,
+        approval_key: str,
+        hts_id: str,
+        price_codes: Sequence[str],
+        orderbook_codes: Sequence[str],
+        consumer_queues: dict[str, queue.Queue] = {'recording_q': asyncio.Queue(), 'trading_q': asyncio.Queue(), 'show_q': asyncio.Queue()},
+        tr_price: str,
+        tr_orderbook: str,
+        tr_notice: str,
+        simul_mode: bool = False,
+        max_pending: int = 10_000,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        self.ws_url = ws_url
+        self.approval_key = approval_key
+        self.hts_id = hts_id
+        self.price_codes = list(price_codes)
+        self.orderbook_codes = list(orderbook_codes)
+        self.tr_price = tr_price
+        self.tr_orderbook = tr_orderbook
+        self.tr_notice = tr_notice
+        self.simul_mode = simul_mode
+        self.log = logger or logging.getLogger(__name__)
 
-        try:
-            self.save_q.put(parsed_data)
-        except Full:
-            # 유실 절대 금지라면 여기서 전략을 바꿔야 함:
-            # 1) put(tick)으로 블록(수신 지연 감수)
-            # 2) 파일/메모리 버퍼 확대
-            # 3) 저장 워커 확장/배치쓰기
-            # 지금은 경고만:
-            print("save_q FULL! (유실 금지면 설계 조정 필요)")
-            # self.save_q.put(tick)  # <- 유실 금지 최우선이면 이쪽
+        # 컨슈머별 독립 큐. 하나를 공유하면 데이터를 나눠 먹는다.
+        self.consumer_queues = consumer_queues
 
-        # 2) 최신 tick은 덮어쓰기(항상 최신만)
-        with self._latest_lock:
-            self._latest_tick = parsed_data
+        self._raw_q: asyncio.Queue[Tick] = asyncio.Queue(maxsize=max_pending)
+        self._ack: dict[tuple[str, str], asyncio.Future] = {}
+        self._dropped = 0
+        self._stopping = asyncio.Event()
 
-        self.tick_event.set()  # tick 이벤트 신호 (전략이 대기 중이라면 깨어남)
+        # 프레임 폐기 통계 (연속 실패가 한도를 넘으면 세션을 재수립)
+        self._known_tr_ids = {tr_price, tr_orderbook, tr_notice}
+        self._consecutive_bad = 0
+        self._total_bad = 0
+        self._last_bad_log: dict[str, float] = {}
 
-                # --- SHOW용 통계 업데이트 ---
-        with self._stats_lock:
-            self._stats["total_msgs"] += 1
-            self._stats["last_msg_time"] = datetime.datetime.now()
-            self._stats["last_tr_id"] = tr_id if not self.test_mode else "TEST"
-            self._stats["last_kind"] = "orderbook" if (not self.test_mode and tr_id == "H0STASP0") else "tick"
-            # parsed_data는 list[dict] 형태니까 첫 원소 기준으로 요약
-            if parsed_data and isinstance(parsed_data, list):
-                row0 = parsed_data[0]
-                self._stats["last_code"] = row0.get("stock_code")
-                self._stats["last_price"] = row0.get("price")
+    # ── 구독 목록 ────────────────────────────────────────────────
+    def subscriptions(self) -> list[Subscription]:
+        subs = [Subscription(self.tr_price, c) for c in self.price_codes]
+        subs += [Subscription(self.tr_orderbook, c) for c in self.orderbook_codes]
+        subs.append(Subscription(self.tr_notice, self.hts_id))
 
-        self.event_q.put((tr_id, parsed_data))   # 유실 싫으면 put_nowait 말고 put(블록)
+        if len(subs) > self.MAX_SUBSCRIPTIONS:
+            raise ValueError(
+                f"구독 {len(subs)}건 > 한도 {self.MAX_SUBSCRIPTIONS}건. "
+                "세션을 분리하거나 종목을 줄이세요."
+            )
+        return subs
 
-    def on_open(self, ws):
-        """WebSocket 연결이 열렸을 때 호출되는 함수"""
-        print("=" * 50)
-        print("WebSocket 연결 성공!")
-        print("=" * 50)
-        if self.price_book:
-            for stock in self.price_book:
-                # 실시간 체결가 구독
-                ws.send(self.build_message("H0STCNT0", stock))
-                print(f"[구독요청] {stock} 실시간 체결가 (H0STCNT0)")
-
-        if self.order_book:
-            for stock in self.order_book:
-                #  실시간 호가 구독 (하나의 연결에서 여러 개 구독 가능!)
-                ws.send(self.build_message("H0STASP0", stock))
-                print(f"[구독요청] {stock} 실시간 호가 (H0STASP0)")
-
-    def on_error(self, ws, error):
-        """에러 발생 시 호출되는 함수"""
-        print(f"[에러] {error}")
-
-    def on_close(self, ws, status_code, msg):
-        """WebSocket 연결이 끊겼을 때 호출되는 함수"""
-        print(f"[연결종료] 상태코드: {status_code}, 메시지: {msg}")
-
-    def get_approval_key(self):
-        url = f"{kis_config.domain}/oauth2/Approval"
-        headers = {"content-type": "application/json"}
-        body = {
-            "grant_type": "client_credentials",
-            "appkey": kis_config.APPKEY,
-            "secretkey": kis_config.APPSECRET
-        }
-        res = requests.post(url, headers=headers, data=json.dumps(body))
-        return res.json()["approval_key"]
-    
-    # ──────────────────────────────────────
-    # 구독 메시지 생성
-    # ──────────────────────────────────────
-    def build_message(self, tr_id, tr_key, tr_type="1"):
+    def make_subscribe_msg(self, tr_type: str, sub: Subscription) -> str:
         return json.dumps({
             "header": {
-                "approval_key": self.APPROVAL_KEY,
+                "approval_key": self.approval_key,
                 "custtype": "P",
-                "tr_type": tr_type,              # "1":구독, "2":해제
-                "content-type": "utf-8"
+                "tr_type": tr_type,          # "1" 등록 / "2" 해지
+                "content-type": "utf-8",
             },
-            "body": {
-                "input": {
-                    "tr_id": tr_id,              # H0STCNT0 :체결가 or H0STASP0 : 호가
-                    "tr_key": tr_key             # 종목코드
-                }
-            }
+            "body": {"input": {"tr_id": sub.tr_id, "tr_key": sub.tr_key}},
         })
-    
-    def recording(self):
 
-        file_path = kis_config.DATA_DIR / 'kis_data.db'
-        conn = sqlite3.connect(file_path)
-        if self.price_book:
-            file_name = "price_book"
-            if self.test_mode:
-                file_name = "test_price_book"
-        elif self.order_book:
-            file_name = "order_book"
-            if self.test_mode:
-                file_name = "test_order_book"
-        
-        batch = []
-        last_flush = time.time()
+    # ── 최상위 실행 루프 (재연결 담당) ───────────────────────────
+    async def run(self) -> None:
+        backoff = self.BASE_BACKOFF
+        try:
+            while not self._stopping.is_set():
+                try:
+                    await self._session()
+                    backoff = self.BASE_BACKOFF          # 정상 세션 후 리셋
+                except asyncio.CancelledError:
+                    raise
+                except (ConnectionClosed, OSError) as e:
+                    self.log.warning("연결 끊김: %r → %.1fs 후 재연결", e, backoff)
+                except Exception:
+                    self.log.exception("세션 예외 → %.1fs 후 재연결", backoff)
 
-        while not self._stop.is_set():
+                if self._stopping.is_set():
+                    break
+
+                # 지터를 섞어 동시 재접속 폭주를 방지
+                await asyncio.sleep(backoff + random.uniform(0, backoff * 0.3))
+                backoff = min(backoff * 2, self.MAX_BACKOFF)
+        finally:
+            self._shutdown_consumers()
+
+    async def _session(self) -> None:
+        # ping_interval=None: KIS는 표준 ping에 응답하지 않고
+        # 애플리케이션 레벨 PINGPONG을 쓴다. 켜두면 라이브러리가
+        # 'no close frame received'로 연결을 끊는다.
+        async with websockets.connect(
+            self.ws_url, ping_interval=None, close_timeout=5,
+        ) as ws:
+            self.log.info("WebSocket 연결됨: %s", self.ws_url)
+
+            recv_task = asyncio.create_task(self._recv_loop(ws), name="recv")
+            pump_task = asyncio.create_task(self._pump(), name="pump")
             try:
-                tick = self.save_q.get(timeout=0.2)
-                batch.extend(tick)  # Extend batch with tick data (assuming tick is a list)
-                self.save_q.task_done()
-            except Empty:
+                # 구독 ACK는 recv 루프가 처리하므로 먼저 띄운 뒤 구독
+                await self._subscribe_all(ws)
+                done, pending = await asyncio.wait(
+                    {recv_task, pump_task},
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                for t in done:
+                    t.result()                        # 예외를 밖으로 전파
+            finally:
+                for t in (recv_task, pump_task):
+                    t.cancel()
+                await asyncio.gather(recv_task, pump_task, return_exceptions=True)
+                self._fail_pending_acks()
+
+    # ── 구독 (ACK 대기) ──────────────────────────────────────────
+    async def _subscribe_all(self, ws) -> None:
+        for sub in self.subscriptions():
+            ok = await self._subscribe_one(ws, sub)
+            if not ok:
+                self.log.warning("구독 ACK 미확인: %s %s (계속 진행)",
+                                 sub.tr_id, sub.tr_key)
+            await asyncio.sleep(self.SUBSCRIBE_GAP)
+
+    async def _subscribe_one(self, ws, sub: Subscription) -> bool:
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._ack[sub.ack_key] = fut
+        try:
+            await ws.send(self.make_subscribe_msg("1", sub))
+            await asyncio.wait_for(fut, timeout=self.ACK_TIMEOUT)
+            self.log.info("구독 완료: %s %s", sub.tr_id, sub.tr_key)
+            return True
+        except asyncio.TimeoutError:
+            return False
+        finally:
+            self._ack.pop(sub.ack_key, None)
+
+    def _fail_pending_acks(self) -> None:
+        for fut in self._ack.values():
+            if not fut.done():
+                fut.cancel()
+        self._ack.clear()
+
+    # ── 수신 루프 (얇게 유지) ────────────────────────────────────
+    async def _recv_loop(self, ws) -> None:
+        """
+        오류를 3등급으로 나눈다.
+          · 연결 오류   → try 밖. 예외를 올려보내 재연결로 간다.
+          · 프레임 1건  → 폐기하고 계속. 루프는 죽지 않는다.
+          · 연속 폐기   → 프로토콜 이상. 예외를 올려 세션을 재수립한다.
+        """
+        self._consecutive_bad = 0
+        while True:
+            frame = await ws.recv()          # ConnectionClosed는 여기서 발생
+
+            if self.simul_mode:
+                continue      # 실데이터 무시. 시뮬 데이터는 별도 프로듀서가 공급
+
+            try:
+                raw = self._decode(frame)
+                kind, value = self._classify(raw)
+                if kind == "tick":
+                    self._enqueue(value)
+                else:
+                    await self._handle_control(ws, value)
+                self._consecutive_bad = 0    # 정상 1건이면 연속 카운터 리셋
+            except Exception as e:
+                self._on_bad_frame(frame, e)  # 한도 초과 시 여기서 예외가 올라감
+
+    # ── 프레임 검증: 봉투만 보고 내용물은 열지 않는다 ────────────
+    def _decode(self, frame) -> str:
+        if isinstance(frame, (bytes, bytearray)):
+            # 서버가 바이너리 프레임으로 보낼 수 있다. int 인덱싱 오류 방지.
+            frame = frame.decode("utf-8", errors="replace")
+        if not isinstance(frame, str):
+            raise TypeError(f"예상 밖 타입 {type(frame).__name__}")
+        if not frame:
+            raise ValueError("빈 프레임")
+        if len(frame) > self.MAX_FRAME_BYTES:
+            raise ValueError(f"과대 프레임 {len(frame)}바이트")
+        return frame
+
+    def _classify(self, raw: str) -> tuple[str, object]:
+        head = raw[0]
+        if head in "01":                     # 실시간: 0=평문 1=암호문
+            return "tick", self._parse_envelope(raw)
+        if head == "{":
+            return "control", raw
+        # 정체불명은 조용히 삼키지 않는다. else로 흘리면 사라진다.
+        raise ValueError(f"분류 불가 (첫 글자 {head!r})")
+
+    def _parse_envelope(self, raw: str) -> Tick:
+        parts = raw.split("|", 3)
+        if len(parts) != 4:
+            raise ValueError(f"필드 {len(parts)}개 (4개 필요)")
+        flag, tr_id, count, payload = parts
+        if tr_id not in self._known_tr_ids:
+            raise ValueError(f"미구독 tr_id {tr_id!r}")
+        if not count.isdigit():
+            raise ValueError(f"건수 비정상 {count!r}")
+        if not payload:
+            raise ValueError("본문 없음")
+        # payload는 문자열 그대로 넘긴다. ^ 분해와 값 검증은 컨슈머 책임.
+        return Tick(tr_id=tr_id, count=int(count),
+                    payload=payload, encrypted=(flag == "1"))
+
+    def _on_bad_frame(self, frame, exc: Exception) -> None:
+        self._consecutive_bad += 1
+        self._total_bad += 1
+
+        # 이상 프레임이 초당 수천 건 오면 로그가 디스크를 채운다 → 종류별 스로틀
+        key = type(exc).__name__
+        now = time.monotonic()
+        if now - self._last_bad_log.get(key, 0.0) > self.BAD_LOG_INTERVAL:
+            self._last_bad_log[key] = now
+            self.log.warning("프레임 폐기(누적 %d건): %s | %.80r",
+                             self._total_bad, exc, frame)
+
+        if self._consecutive_bad >= self.MAX_CONSECUTIVE_BAD:
+            # 한 건 깨지는 건 노이즈지만, 계속 깨지면 프로토콜이 바뀐 것이다.
+            raise RuntimeError(
+                f"연속 {self._consecutive_bad}건 폐기 → 세션 재수립"
+            )
+
+    async def _handle_control(self, ws, raw: str) -> None:
+        # 여기서 나는 예외는 _recv_loop의 가드가 받아 폐기·집계한다.
+        # 조용히 return하면 이상 프레임이 통계에 안 잡힌다.
+        msg = json.loads(raw)
+
+        header = msg.get("header", {})
+        tr_id = header.get("tr_id")
+
+        # PINGPONG은 반드시 되돌려줘야 서버가 연결을 유지한다
+        if tr_id == "PINGPONG":
+            await ws.pong(raw)
+            return
+
+        body = msg.get("body") or {}
+        rt_cd = body.get("rt_cd")
+        tr_key = header.get("tr_key")
+
+        if rt_cd == "0":
+            fut = self._ack.get((tr_id, tr_key))
+            if fut and not fut.done():
+                fut.set_result(body)
+            else:
+                # ⚠️ ACK 매칭이 계속 실패하면 실제 응답 로그를 보고
+                #    tr_key 위치(header vs body.output)를 확인하세요.
+                self.log.debug("매칭 안 된 성공 응답: %s", raw[:200])
+        else:
+            self.log.error("구독 실패 응답: %s", raw[:300])
+
+    # ── asyncio.Queue → queue.Queue 브리지 ─────────────────────
+    def _enqueue(self, tick: Tick) -> None:
+        """루프를 절대 블로킹하지 않는다. 넘치면 버린다."""
+        try:
+            self._raw_q.put_nowait(tick)
+        except asyncio.QueueFull:
+            self._dropped += 1
+            if self._dropped % 100 == 1:
+                self.log.warning("수신 큐 포화, 누적 드롭 %d건", self._dropped)
+
+    async def _pump(self) -> None:
+        while True:
+            tick = await self._raw_q.get()
+            for name, q in self.consumer_queues.items():
+                try:
+                    q.put_nowait(tick)
+                except queue.Full:
+                    self.log.warning("[%s] 큐 포화, 틱 드롭", name)
+
+    # ── 종료 ────────────────────────────────────────────────────
+    def stop(self) -> None:
+        self._stopping.set()
+
+    def _shutdown_consumers(self) -> None:
+        """스레드가 get()에서 영원히 대기하지 않도록 sentinel 투입."""
+        for q in self.consumer_queues.values():
+            try:
+                q.put_nowait(SENTINEL)
+            except queue.Full:
                 pass
 
-            now = time.time()
 
-            # ① 500개 모이면 저장
-            # ② 또는 1초 지났으면 저장
-            if len(batch) >= 2 or (batch and now - last_flush > 50.0):
-                df = pd.DataFrame(batch)
-                df.to_sql(file_name, conn, if_exists="append", index=False)  # 매번 덮어쓰기 (최신 데이터만 유지)
-                batch.clear()
-                last_flush = now
+# ── 스레드 컨슈머 예시 ──────────────────────────────────────────
+def consumer_worker(name: str, q: queue.Queue, handle) -> None:
+    log = logging.getLogger(name)
+    while True:
+        item = q.get()
+        if item is SENTINEL:
+            log.info("[%s] 종료 신호 수신", name)
+            break
+        try:
+            handle(item)          # DB 쓰기, 주문 등 블로킹 작업 OK
+        except Exception:
+            log.exception("[%s] 처리 실패", name)
+        finally:
+            q.task_done()
 
-    def trading(self):
-        if self.strategy is None:
-            print("전략이 없습니다. trading() 종료.")
-            return
-        while not self._stop.is_set():
-            self.tick_event.wait()   # 틱이 올 때까지 잠
-            self.tick_event.clear()  # 깨어났으니 다시 잠들 준비
-            # 최신 tick 스냅샷만 잠깐 복사 (락 짧게)
 
-            with self._latest_lock:
-                tick = self._latest_tick
+# ── 실행부: asyncio 루프 + 스레드 조립 ──────────────────────────
+async def main(kis_config, record_handler, trade_handler) -> None:
+    import signal
+    import threading
 
-            if tick:
-                self.window.extend(tick)   # 최근 200틱 유지
-            self.strategy.next()  # 전략의 next() 호출 (틱마다)
-    
-    def add_strategy(self, strategy):
-        self.strategy = strategy(data=self.window)
+    # 컨슈머별 독립 큐. maxsize를 주면 포화 시 드롭 정책이 작동한다.
+    qs = {
+        "recording": queue.Queue(maxsize=50_000),   # 유실 최소화 → 크게
+        "trading": queue.Queue(maxsize=1_000),      # 최신성 우선 → 작게
+    }
 
-    def stop(self):
-        self._stop.set()
+    feed = KisFeed(
+        ws_url=kis_config.WS_URL,
+        approval_key=kis_config.APPROVAL_KEY,
+        hts_id=kis_config.HTS_ID,
+        price_codes=["005930", "000660"],
+        orderbook_codes=["005930"],
+        consumer_queues=qs,
+        tr_price="H0STCNT0",
+        tr_orderbook="H0STASP0",
+        tr_notice="H0STCNI0",
+    )
 
-    def export_test_data(self):
-        # now = datetime.datetime.now().strftime("%H:%M:%S")
-        # if self.price_book:
-        #     test_data = {'datetime' : now, 'stock_code':"test_code", 'price':f"{random.randint(1000, 2000)}", 'volume': "test_volume", 'total_tr_value':"test_total_tr_value", 'change':"test_change", 'pct_change':"test_pct_change"}
-        #     parsed_data = [test_data for _ in range(5)]
-        # elif self.order_book:
-        #     test_data = {'datetime' : now, 'stock_code':'test_code', 'level': 'test_level', 'price' : f"{random.randint(1000, 2000)}", 'qty' : 'test_qty'}
-        #     parsed_data = [test_data for _ in range(5)]
-        # return parsed_data
+    threads = [
+        threading.Thread(target=consumer_worker, args=("recording", qs["recording"], record_handler), daemon=True),
+        threading.Thread(target=consumer_worker, args=("trading", qs["trading"], trade_handler), daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
-        price_book_message = "0|H0STASP0|001|088350^131404^0^6140^6150^6160^6170^6180^6190^6200^6210^6220^6230^6130^6120^6110^6100^6090^6080^6070^6060^6050^6040^81678^42182^16711^9388^9914^18570^95925^19565^13797^25943^1095^21584^13696^11160^4400^13144^4930^11426^30268^8388^333673^120091^0^0^0^0^48076^-6600^5^-100.00^70028035^100^888^0^0^0^6135^0^0"
-        order_book_message = "" 
-    
-    def run(self, trading=False, recording=False, test_mode=True):
-        ui = kis_controller.ScreenManager(event_q=self.event_q)
-        threading.Thread(target=ui.start, daemon=True).start()
-        self.test_mode = test_mode
-        if trading:
-            threading.Thread(target=self.trading, daemon=True).start()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, feed.stop)     # Ctrl+C → 정상 종료
 
-        if recording:
-            threading.Thread(target=self.recording, daemon=True).start()
-
-        if self.price_book or self.order_book:         
-            # ② WebSocket 앱 생성 (콜백 함수 연결)
-            ws = websocket.WebSocketApp(
-                kis_config.WS_URL,                              # WebSocket URL
-                on_open=self.on_open,                     # 연결 시 → 구독 요청
-                on_message=self.on_message,               # 데이터 수신 시 → 파싱
-                on_error=self.on_error,                   # 에러 시
-                on_close=self.on_close                    # 종료 시
-            )
-                # ③ 무한 루프로 실행 (Ctrl+C로 종료)
-            print("실시간 데이터 수신 시작... (Ctrl+C로 종료)")
-            ws.run_forever(ping_interval=20, ping_timeout=10)                         # 연결 유지하며 데이터 수신
-        
-
-# ──────────────────────────────────────
-# 실행
-# ──────────────────────────────────────
-if __name__ == "__main__":
-    e = KisEngine(order_book=['001290', '015260'])
-    e.add_strategy(test_st.KisOvernightMomentumStrategy)
-    e.run(trading=True, recording=True, test_mode=False)
+    try:
+        await feed.run()
+    finally:
+        for t in threads:                          # sentinel 소진 대기
+            t.join(timeout=10)

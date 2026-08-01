@@ -7,6 +7,9 @@ import logging
 
 from kis import kis_config
 
+from kis import fake_kis_websocket as fake_kis
+
+websockets.connect = fake_kis.connect 
 
 class KISWebSocket:
 

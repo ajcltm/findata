@@ -11,13 +11,13 @@ if __name__ == "__main__":
     logger.info("kis_engine start")
     
     # 예시: 삼성전자(005930) 시세 + 체결 통보 구독
-    price_codes = ["263750", "009830", "047040"]
-    orderbook_codes = ["263750", "009830", "047040"]
+    price_codes = ["000660"]
+    orderbook_codes = ["005930"]
 
     # simul_engine = kis_engine.KiSEngine(price_codes=price_codes, orderbook_codes=orderbook_codes, simul_mode=True)
     # simul_engine.add_strategy(test_st.KisOvernightMomentumStrategy)
     # simul_engine.run(recording=True, trading=True, show=False)
 
     engine = kis_engine.KiSEngine(price_codes=price_codes, orderbook_codes=orderbook_codes, simul_mode=False)
-    engine.add_strategy(test_st.KisOvernightMomentumStrategy)
-    engine.run(recording=True, trading=True, show=True)
+    # engine.add_strategy(test_st.KisOvernightMomentumStrategy)
+    engine.run(recording=False, trading=False, show=True)
