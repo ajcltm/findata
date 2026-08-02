@@ -30,25 +30,25 @@ class KisRecorder:
 
             while not self._stop.is_set():
                 try:
-                    msg = self.save_q.get(timeout=0.2)
-                    tr_id, parsed_data = self.parser.parse(msg)
-                    if tr_id == "H0STCNT0":
+                    tick = self.save_q.get(timeout=0.2)
+                    parsed_tick = self.parser.parse(tick)
+                    if parsed_tick.tr_id == "H0STCNT0":
                         file_name = "new_price_book"
                         if self.test_mode:
                             file_name = "simul_price_book"
-                        price_book_batch.extend(parsed_data)  # Extend batch with tick data (assuming tick is a list)
+                        price_book_batch.extend(parsed_tick.data)  # Extend batch with tick data (assuming tick is a list)
                         
-                    if tr_id == "H0STASP0":
+                    if parsed_tick.tr_id == "H0STASP0":
                         file_name = "new_order_book"
                         if self.test_mode:
                             file_name = "simul_order_book"
-                        order_book_batch.extend(parsed_data)  # Extend batch with tick data (assuming tick is a list)
+                        order_book_batch.extend(parsed_tick.data)  # Extend batch with tick data (assuming tick is a list)
 
-                    if tr_id == "H0STCNI0":
+                    if parsed_tick.tr_id == "H0STCNI0":
                         file_name = "new_order"
                         if self.test_mode:
                             file_name = "simul_order"
-                        order_batch.extend(parsed_data)                     
+                        order_batch.extend(parsed_tick.data)
                     self.save_q.task_done()
                 except Empty:
                     pass

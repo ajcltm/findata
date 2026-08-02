@@ -25,9 +25,15 @@ import random
 import time
 from dataclasses import dataclass
 from typing import Sequence
-
+import requests
 import websockets
 from websockets.exceptions import ConnectionClosed
+
+from kis import kis_config
+from kis import fake_kis_websocket as fake_kis
+
+
+websockets.connect = fake_kis.connect 
 
 # 스레드 컨슈머 종료 신호. recording/trading 루프에서 이 값을 받으면 break.
 SENTINEL = object()
@@ -51,6 +57,11 @@ class Tick:
     count: int          # 데이터 건수
     payload: str        # ^ 구분 원본 바디
     encrypted: bool
+    # 암호 프레임(flag=1)일 때만 채운다. 세션마다 값이 바뀌므로
+    # 공유 dict를 스레드가 읽게 하면 재연결 순간 옛 틱에 새 키를 쓰게 된다.
+    # 틱에 실어 보내면 그 짝이 절대 어긋나지 않는다.
+    iv: str | None = None
+    key: str | None = None
 
 
 class KisFeed:
@@ -66,29 +77,30 @@ class KisFeed:
 
     def __init__(
         self,
-        *,
-        ws_url: str,
-        approval_key: str,
-        hts_id: str,
         price_codes: Sequence[str],
         orderbook_codes: Sequence[str],
-        consumer_queues: dict[str, queue.Queue] = {'recording_q': asyncio.Queue(), 'trading_q': asyncio.Queue(), 'show_q': asyncio.Queue()},
-        tr_price: str,
-        tr_orderbook: str,
-        tr_notice: str,
+        consumer_queues: dict[str, queue.Queue],
         simul_mode: bool = False,
         max_pending: int = 10_000,
         logger: logging.Logger | None = None,
     ) -> None:
-        self.ws_url = ws_url
-        self.approval_key = approval_key
-        self.hts_id = hts_id
+        self.ws_url = kis_config.WS_URL,
+        self.hts_id = kis_config.HTS_ID,
+        self.approval_key = self.get_approval_key()
         self.price_codes = list(price_codes)
         self.orderbook_codes = list(orderbook_codes)
-        self.tr_price = tr_price
-        self.tr_orderbook = tr_orderbook
-        self.tr_notice = tr_notice
+        self.tr_price = "H0STCNT0"  # 실시간 주식 체결가 (시세)
+        self.tr_orderbook = "H0STASP0"  # 실시간 주식 호가 (시세)
+        self.tr_notice = "H0STCNI0"  # 모의 : "H0STCNI9"  # 체결 통보
         self.simul_mode = simul_mode
+
+        # 접속 함수를 여기서 한 번만 고른다. _session은 이게 진짜인지 모른다.
+        # fake_kis는 테스트 전용이므로 필요할 때만 import (실전 배포에 불필요).
+        if self.simul_mode:
+            from kis import fake_kis_websocket as fake_kis
+            self._connect = fake_kis.connect
+        else:
+            self._connect = websockets.connect
         self.log = logger or logging.getLogger(__name__)
 
         # 컨슈머별 독립 큐. 하나를 공유하면 데이터를 나눠 먹는다.
@@ -100,10 +112,24 @@ class KisFeed:
         self._stopping = asyncio.Event()
 
         # 프레임 폐기 통계 (연속 실패가 한도를 넘으면 세션을 재수립)
-        self._known_tr_ids = {tr_price, tr_orderbook, tr_notice}
+        self._known_tr_ids = {self.tr_price, self.tr_orderbook, self.tr_notice}
         self._consecutive_bad = 0
         self._total_bad = 0
+
+        # tr_id -> (iv, key). 세션 한정. 재연결 시 비운다.
+        self._crypto: dict[str, tuple[str, str]] = {}
         self._last_bad_log: dict[str, float] = {}
+
+    def get_approval_key(self):
+        url = f"{kis_config.domain}/oauth2/Approval"
+        headers = {"content-type": "application/json"}
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": kis_config.APPKEY,
+            "secretkey": kis_config.APPSECRET
+        }
+        res = requests.post(url, headers=headers, data=json.dumps(body))
+        return res.json()["approval_key"]
 
     # ── 구독 목록 ────────────────────────────────────────────────
     def subscriptions(self) -> list[Subscription]:
@@ -157,7 +183,7 @@ class KisFeed:
         # ping_interval=None: KIS는 표준 ping에 응답하지 않고
         # 애플리케이션 레벨 PINGPONG을 쓴다. 켜두면 라이브러리가
         # 'no close frame received'로 연결을 끊는다.
-        async with websockets.connect(
+        async with self._connect(
             self.ws_url, ping_interval=None, close_timeout=5,
         ) as ws:
             self.log.info("WebSocket 연결됨: %s", self.ws_url)
@@ -220,9 +246,6 @@ class KisFeed:
         while True:
             frame = await ws.recv()          # ConnectionClosed는 여기서 발생
 
-            if self.simul_mode:
-                continue      # 실데이터 무시. 시뮬 데이터는 별도 프로듀서가 공급
-
             try:
                 raw = self._decode(frame)
                 kind, value = self._classify(raw)
@@ -268,8 +291,15 @@ class KisFeed:
         if not payload:
             raise ValueError("본문 없음")
         # payload는 문자열 그대로 넘긴다. ^ 분해와 값 검증은 컨슈머 책임.
-        return Tick(tr_id=tr_id, count=int(count),
-                    payload=payload, encrypted=(flag == "1"))
+        encrypted = (flag == "1")
+        iv = key = None
+        if encrypted:
+            pair = self._crypto.get(tr_id)
+            if not pair:
+                raise ValueError(f"{tr_id} 암호 프레임인데 키 없음")
+            iv, key = pair
+        return Tick(tr_id=tr_id, count=int(count), payload=payload,
+                    encrypted=encrypted, iv=iv, key=key)
 
     def _on_bad_frame(self, frame, exc: Exception) -> None:
         self._consecutive_bad += 1
@@ -307,12 +337,19 @@ class KisFeed:
         tr_key = header.get("tr_key")
 
         if rt_cd == "0":
+            # 구독 응답에 복호화 재료가 실려 온다. 세션 한정이므로 메모리에만
+            # 둔다. 파일로 남기면 재연결 후 옛 키를 쓰게 되고, 체결통보에는
+            # 계좌·주문 정보가 들어 있어 평문 저장 자체가 위험하다.
+            out = body.get("output") or {}
+            iv, key = out.get("iv"), out.get("key")
+            if iv and key:
+                self._crypto[tr_id] = (iv, key)
+                self.log.info("복호화 키 수신: %s", tr_id)
+ 
             fut = self._ack.get((tr_id, tr_key))
             if fut and not fut.done():
                 fut.set_result(body)
             else:
-                # ⚠️ ACK 매칭이 계속 실패하면 실제 응답 로그를 보고
-                #    tr_key 위치(header vs body.output)를 확인하세요.
                 self.log.debug("매칭 안 된 성공 응답: %s", raw[:200])
         else:
             self.log.error("구독 실패 응답: %s", raw[:300])

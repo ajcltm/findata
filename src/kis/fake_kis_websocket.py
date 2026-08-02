@@ -130,7 +130,10 @@ class FakeKisWebSocket:
         await self._out.put(json.dumps({
             "header": {"tr_id": tr_id, "tr_key": tr_key},
             "body": {"rt_cd": "0", "msg_cd": "OPSP0000",
-                     "msg1": "SUBSCRIBE SUCCESS"},
+                     "msg1": "SUBSCRIBE SUCCESS",
+                     # 실제 서버는 iv/key를 항상 실어 보낸다 (encrypt=N이어도)
+                     "output": {"iv": "f4101ab55c403cd8",
+                                "key": "oktpbgrsmxvzlbcrhfykfkcqvzeeupjk"}},
         }))
 
     async def pong(self, data=None) -> None:

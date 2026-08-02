@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import datetime
 import logging
 
@@ -5,54 +6,45 @@ from base64 import b64decode
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 
+@dataclass
+class ParsedTick:
+    tr_id: str
+    data: list[dict]
+
 class KISParser:
 
-    def __init__(self, crypto_info):
+    def __init__(self):
         self.logger = logging.getLogger("kis")
-        self.crypto_info = crypto_info
-
-    def parse(self, msg):
+       
+    def parse(self, tick):
         try:
-            # ② 문자열 형태 → 실시간 데이터
-            # 형식: "암호화여부|tr_id|건수|데이터"
-            parts = msg.split("|")              # "|"로 분리
-            encrypt_flag = parts[0]                 # 0: 평문, 1: 암호화
-            tr_id = parts[1]                        # 거래 ID
-            data_count = parts[2]                   # 데이터 건수
-            raw_data = parts[3]                     # 실제 데이터 ("^"로 구분)
             
-            if tr_id == "H0STCNT0":  # 시세
-                if encrypt_flag == "0":
-                    return tr_id, self.parse_execution(raw_data, data_count)
-                raw_data = self.aes256_cbc_base64_decrypt(iv=self.crypto_info.get(tr_id).get('iv'), key=self.crypto_info.get(tr_id).get('key'), cipher_text_b64=parts[3])
-                return tr_id, self.parse_execution(raw_data, data_count)
-                
-            elif tr_id == "H0STASP0":  # 호가
-                if encrypt_flag == "0":
-                    return tr_id, self.parse_orderbook(raw_data, data_count)
-                raw_data = self.aes256_cbc_base64_decrypt(iv=self.crypto_info.get(tr_id).get('iv'), key=self.crypto_info.get(tr_id).get('key'), cipher_text_b64=parts[3])
-                return tr_id, self.parse_orderbook(raw_data, data_count)
-            
-            elif tr_id == "H0STCNI0":  # 체결 통보
-                if encrypt_flag == "0":
-                    return tr_id, self.parse_notice(raw_data, data_count)
+            if tick.tr_id == "H0STCNT0":  # 시세
+                if not tick.encrypted:
+                    return self.parse_execution(tick.payload, tick.count)
+                decrypted = self.aes256_cbc_base64_decrypt(iv=tick.iv, key=tick.key, cipher_text_b64=tick.payload)
+                return self.parse_execution(decrypted, tick.count)
 
-                raw_data = self.aes256_cbc_base64_decrypt(iv=self.crypto_info.get(tr_id).get('iv'), key=self.crypto_info.get(tr_id).get('key'), cipher_text_b64=parts[3])
-                return tr_id, self.parse_notice(raw_data, data_count)
-            
+            elif tick.tr_id == "H0STASP0":  # 호가
+                if not tick.encrypted:
+                    return self.parse_orderbook(tick.payload, tick.count)
+                decrypted = self.aes256_cbc_base64_decrypt(iv=tick.iv, key=tick.key, cipher_text_b64=tick.payload)
+                return self.parse_orderbook(decrypted, tick.count)
+
+            elif tick.tr_id == "H0STCNI0":  # 체결 통보
+                if not tick.encrypted:
+                    return self.parse_notice(tick.payload, tick.count)
+
+                decrypted = self.aes256_cbc_base64_decrypt(iv=tick.iv, key=tick.key, cipher_text_b64=tick.payload)
+                return self.parse_notice(decrypted, tick.count)
+
             else:
-                print(f"⚠️ 알 수 없는 TR ID: {tr_id}")
+                print(f"⚠️ 알 수 없는 TR ID: {tick.tr_id}")
                 return None
 
         except Exception as e:
-            parts = msg.split("|")              # "|"로 분리
-            encrypt_flag = parts[0]                 # 0: 평문, 1: 암호화
-            tr_id = parts[1]                        # 거래 ID
-            data_count = parts[2]                   # 데이터 건수
-            raw_data = parts[3]                     # 실제 데이터 ("^"로 구분)
             print(f"❌ 데이터 파싱 오류: {e}")
-            self.logger.error(f"데이터 파싱 오류 msg: {msg}")
-            self.logger.error(f"데이터 파싱 오류 tr_id: {tr_id} / data_count: {data_count} / raw_data: {raw_data}")
+            self.logger.error(f"데이터 파싱 오류 tr_id: {tick.tr_id} / data_count: {tick.count} / raw_data: {tick.payload}")
             return None
     
     def parse_execution(self, data_str, data_count):
@@ -111,7 +103,7 @@ class KISParser:
                 'vi_standard_price': f[45]        # VI_STND_PRC: 정적VI발동기준가
             }
             parsed_data.append(parsed)
-        return parsed_data
+        return ParsedTick(tr_id="H0STCNT0", data=parsed_data)
         
     def parse_orderbook(self, data_str, data_count):
         """호가 데이터 파싱"""
@@ -163,7 +155,7 @@ class KISParser:
                 'trade_cls_code': f[58]           # STCK_DEAL_CLS_CODE: 주식 매매 구분 코드
             }
             parsed_data.append(prased)
-        return parsed_data
+        return ParsedTick(tr_id="H0STASP0", data=parsed_data)
     
     def parse_notice(self, data_str, data_count):
         """체결 통보 데이터 파싱"""
@@ -202,7 +194,7 @@ class KISParser:
                     # 'loan_date': f[23],             # CRDT_LOAN_DATE: 신용대출일자
                 }
             parsed_data.append(parsed)
-        return parsed_data
+        return ParsedTick(tr_id="H0STCNI0", data=parsed_data)
     
     def now(self):
         return datetime.datetime.now().isoformat(timespec="seconds")

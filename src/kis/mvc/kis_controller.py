@@ -23,11 +23,11 @@ class ScreenManager:
         q = self.state.event_q
         for _ in range(max_items):
             try:
-                data = q.get_nowait()
-                tr_id, parsed = self.parser.parse(data)
+                tick = q.get_nowait()
+                parsed_tick = self.parser.parse(tick)
             except Empty:
                 break
-            self.state.on_event(tr_id, parsed)
+            self.state.on_event(parsed_tick.tr_id, parsed_tick.data)
             q.task_done()
 
     def _render_loop(self):

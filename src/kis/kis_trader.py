@@ -24,10 +24,10 @@ class KisTrader:
             
             while not self._stop.is_set():
                 try:
-                    data = self.trading_q.get(timeout=0.2)
-                    if data:
-                        parsed = self.parser.parse(data)
-                        self.window.extend(parsed)   # 최근 200틱 유지
+                    tick = self.trading_q.get(timeout=0.2)
+                    if tick:
+                        parsed_tick = self.parser.parse(tick)
+                        self.window.extend(parsed_tick)   # 최근 200틱 유지
                     self.strategy.next()  # 전략의 next() 호출 (틱마다)
                 except Empty:
                     pass

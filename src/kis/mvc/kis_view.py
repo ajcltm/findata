@@ -1,5 +1,6 @@
 import os, datetime
 import subprocess
+import asyncio
 
 class HomeScreen:
     name = "home"
@@ -21,8 +22,20 @@ class HomeScreen:
         print(f"  {'구분':<12} {'종목코드':<10} {'상태'}")
         print("  " + "-" * 35)
         for key, info in s["subscriptions"].items():
-            code = key.replace("_ob", "")
-            print(f"  {info['type']:<12} {code:<10} {info['status']}")
+            tr_id, code = key
+            if isinstance(info, asyncio.Future):
+                if info.done():
+                    try:
+                        info = info.result()
+                        status = info.get("msg1", "unknown")
+                    except Exception as e:
+                        status = "error"
+                        continue
+                else:
+                    status = "대기 중"
+                    continue
+            type_str = "시세" if tr_id == "H0STCNT0" else ("호가" if tr_id == "H0STASP0" else "체결통보")
+            print(f"  {type_str:<12} {code:<10} {status}")
 
         print("=" * 70)
         print(f"  [h]home  [r]realdata  [o]orders  [q]quit")
