@@ -9,7 +9,7 @@ from Crypto.Util.Padding import unpad
 @dataclass
 class ParsedTick:
     tr_id: str
-    data: list[dict]
+    data: list
 
 class KISParser:
 
