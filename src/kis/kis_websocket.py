@@ -30,10 +30,6 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 from kis import kis_config
-from kis import fake_kis_websocket as fake_kis
-
-
-websockets.connect = fake_kis.connect 
 
 # 스레드 컨슈머 종료 신호. recording/trading 루프에서 이 값을 받으면 break.
 SENTINEL = object()
@@ -84,9 +80,9 @@ class KisFeed:
         max_pending: int = 10_000,
         logger: logging.Logger | None = None,
     ) -> None:
-        self.ws_url = kis_config.WS_URL,
-        self.hts_id = kis_config.HTS_ID,
-        self.approval_key = self.get_approval_key()
+        self.ws_url = kis_config.WS_URL
+        self.hts_id = kis_config.HTS_ID
+        self.approval_key = "fake" if simul_mode else self.get_approval_key()
         self.price_codes = list(price_codes)
         self.orderbook_codes = list(orderbook_codes)
         self.tr_price = "H0STCNT0"  # 실시간 주식 체결가 (시세)
