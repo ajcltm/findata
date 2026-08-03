@@ -104,8 +104,10 @@ class KisFeed:
 
         self._raw_q: asyncio.Queue[Tick] = asyncio.Queue(maxsize=max_pending)
         self._ack: dict[tuple[str, str], asyncio.Future] = {}
+        self._sub_status: dict[tuple[str, str], str] = {}
         self._dropped = 0
         self._stopping = asyncio.Event()
+        self._loop = None
 
         # 프레임 폐기 통계 (연속 실패가 한도를 넘으면 세션을 재수립)
         self._known_tr_ids = {self.tr_price, self.tr_orderbook, self.tr_notice}
@@ -153,6 +155,7 @@ class KisFeed:
 
     # ── 최상위 실행 루프 (재연결 담당) ───────────────────────────
     async def run(self) -> None:
+        self._loop = asyncio.get_running_loop()
         backoff = self.BASE_BACKOFF
         try:
             while not self._stopping.is_set():
@@ -176,9 +179,6 @@ class KisFeed:
             self._shutdown_consumers()
 
     async def _session(self) -> None:
-        # ping_interval=None: KIS는 표준 ping에 응답하지 않고
-        # 애플리케이션 레벨 PINGPONG을 쓴다. 켜두면 라이브러리가
-        # 'no close frame received'로 연결을 끊는다.
         async with self._connect(
             self.ws_url, ping_interval=None, close_timeout=5,
         ) as ws:
@@ -186,19 +186,21 @@ class KisFeed:
 
             recv_task = asyncio.create_task(self._recv_loop(ws), name="recv")
             pump_task = asyncio.create_task(self._pump(), name="pump")
+            stop_task = asyncio.create_task(self._stopping.wait(), name="stop")  # ★
+            tasks = {recv_task, pump_task, stop_task}
             try:
-                # 구독 ACK는 recv 루프가 처리하므로 먼저 띄운 뒤 구독
                 await self._subscribe_all(ws)
                 done, pending = await asyncio.wait(
-                    {recv_task, pump_task},
-                    return_when=asyncio.FIRST_EXCEPTION,
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,      # ★ EXCEPTION → COMPLETED
                 )
                 for t in done:
-                    t.result()                        # 예외를 밖으로 전파
+                    if t is not stop_task:
+                        t.result()                            # 예외를 밖으로 전파
             finally:
-                for t in (recv_task, pump_task):
+                for t in tasks:
                     t.cancel()
-                await asyncio.gather(recv_task, pump_task, return_exceptions=True)
+                await asyncio.gather(*tasks, return_exceptions=True)
                 self._fail_pending_acks()
 
     # ── 구독 (ACK 대기) ──────────────────────────────────────────
@@ -217,12 +219,17 @@ class KisFeed:
         try:
             await ws.send(self.make_subscribe_msg("1", sub))
             await asyncio.wait_for(fut, timeout=self.ACK_TIMEOUT)
+            self._sub_status[sub.ack_key] = "대기 중"
             self.log.info("구독 완료: %s %s", sub.tr_id, sub.tr_key)
             return True
         except asyncio.TimeoutError:
             return False
         finally:
             self._ack.pop(sub.ack_key, None)
+
+    def subscription_status(self) -> list[tuple[str, str, str]]:
+        """UI가 읽어가는 창구. 복사본을 준다."""
+        return [(tr, key, st) for (tr, key), st in self._sub_status.items()]
 
     def _fail_pending_acks(self) -> None:
         for fut in self._ack.values():
@@ -345,6 +352,7 @@ class KisFeed:
             fut = self._ack.get((tr_id, tr_key))
             if fut and not fut.done():
                 fut.set_result(body)
+                self._sub_status[(tr_id, tr_key)] = body.get("msg1", "unknown")
             else:
                 self.log.debug("매칭 안 된 성공 응답: %s", raw[:200])
         else:
@@ -370,8 +378,12 @@ class KisFeed:
                     self.log.warning("[%s] 큐 포화, 틱 드롭", name)
 
     # ── 종료 ────────────────────────────────────────────────────
-    def stop(self) -> None:
-        self._stopping.set()
+    def stop(self):
+        loop = self._loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(self._stopping.set)
+        else:
+            self._stopping.set()
 
     def _shutdown_consumers(self) -> None:
         """스레드가 get()에서 영원히 대기하지 않도록 sentinel 투입."""
@@ -396,44 +408,3 @@ def consumer_worker(name: str, q: queue.Queue, handle) -> None:
             log.exception("[%s] 처리 실패", name)
         finally:
             q.task_done()
-
-
-# ── 실행부: asyncio 루프 + 스레드 조립 ──────────────────────────
-async def main(kis_config, record_handler, trade_handler) -> None:
-    import signal
-    import threading
-
-    # 컨슈머별 독립 큐. maxsize를 주면 포화 시 드롭 정책이 작동한다.
-    qs = {
-        "recording": queue.Queue(maxsize=50_000),   # 유실 최소화 → 크게
-        "trading": queue.Queue(maxsize=1_000),      # 최신성 우선 → 작게
-    }
-
-    feed = KisFeed(
-        ws_url=kis_config.WS_URL,
-        approval_key=kis_config.APPROVAL_KEY,
-        hts_id=kis_config.HTS_ID,
-        price_codes=["005930", "000660"],
-        orderbook_codes=["005930"],
-        consumer_queues=qs,
-        tr_price="H0STCNT0",
-        tr_orderbook="H0STASP0",
-        tr_notice="H0STCNI0",
-    )
-
-    threads = [
-        threading.Thread(target=consumer_worker, args=("recording", qs["recording"], record_handler), daemon=True),
-        threading.Thread(target=consumer_worker, args=("trading", qs["trading"], trade_handler), daemon=True),
-    ]
-    for t in threads:
-        t.start()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, feed.stop)     # Ctrl+C → 정상 종료
-
-    try:
-        await feed.run()
-    finally:
-        for t in threads:                          # sentinel 소진 대기
-            t.join(timeout=10)

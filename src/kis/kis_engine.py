@@ -8,6 +8,8 @@ from kis import kis_parser
 from kis import kis_recorder
 from kis import kis_trader
 from src.kis.mvc import kis_controller
+from src.kis.mvc import kis_model
+from src.kis.mvc import kis_view
 
 import logging
 
@@ -42,9 +44,21 @@ class KiSEngine:
         self.logger.info("trading thread on.")
 
     def start_showing(self):
-        ui = kis_controller.ScreenManager(event_q=self.consumer_queue['show_q'], parser = self.parser, subscriptions=self.ws._ack)
-        threading.Thread(target=ui.start, daemon=True).start()
-        self.logger.info("showing thread on.")
+        screens = [
+            kis_view.HomeScreen(),
+            kis_view.RealDataScreen(),
+            kis_view.OrderScreen(),
+        ]
+
+        ctx = kis_model.AppContext(ticks=kis_model.TickState(view_q=self.consumer_queue['show_q']), feed=self.ws, orders=kis_model.OrderState())
+
+        ui = kis_controller.ScreenManager(ctx, view_q=self.consumer_queue['show_q'], screens=screens, parser=self.parser, on_quit=self.ws.stop)
+        try:
+            threading.Thread(target=ui.start, daemon=True).start()
+            self.logger.info("showing thread on.")
+        except Exception as e:
+            self.logger.error(f"Error in showing thread: {e}")
+            self.ws.stop()
 
     def run(self, recording=True, trading=False, show=True):
         self.logger.info("websocket mode run.")

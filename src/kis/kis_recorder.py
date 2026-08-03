@@ -1,5 +1,6 @@
 from kis import kis_config
 from kis import kis_parser
+from kis.kis_websocket import SENTINEL
 
 import sqlite3
 import time
@@ -31,7 +32,12 @@ class KisRecorder:
             while not self._stop.is_set():
                 try:
                     tick = self.save_q.get(timeout=0.2)
+                    if tick is SENTINEL:
+                        break
                     parsed_tick = self.parser.parse(tick)
+                    if parsed_tick is None:
+                        self.save_q.task_done()
+                        continue
                     if parsed_tick.tr_id == "H0STCNT0":
                         file_name = "new_price_book"
                         if self.test_mode:

@@ -43,8 +43,9 @@ class KISParser:
                 return None
 
         except Exception as e:
-            print(f"❌ 데이터 파싱 오류: {e}")
-            self.logger.error(f"데이터 파싱 오류 tr_id: {tick.tr_id} / data_count: {tick.count} / raw_data: {tick.payload}")
+            self.logger.exception(
+                "파싱 실패 tr_id=%s count=%s",
+                getattr(tick, "tr_id", "?"), getattr(tick, "count", "?"))
             return None
     
     def parse_execution(self, data_str, data_count):
