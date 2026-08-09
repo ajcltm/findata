@@ -7,9 +7,10 @@ from kis import kis_simulator
 from kis import kis_parser
 from kis import kis_recorder
 from kis import kis_trader
-from src.kis.mvc import kis_controller
-from src.kis.mvc import kis_model
-from src.kis.mvc import kis_view
+from kis.mvc import kis_controller
+from kis.mvc import kis_model
+from kis.mvc import kis_app
+
 
 import logging
 
@@ -44,17 +45,18 @@ class KiSEngine:
         self.logger.info("trading thread on.")
 
     def start_showing(self):
-        screens = [
-            kis_view.HomeScreen(),
-            kis_view.RealDataScreen(),
-            kis_view.OrderScreen(),
+
+        ctx = kis_model.AppCtx(tickstate=kis_model.TickState(view_q=self.consumer_queue['show_q']), ws=self.ws)
+
+        controllers = [
+            kis_controller.HomeController(ctx),
+            kis_controller.RealDataController(ctx),
+            kis_controller.DetailController(ctx),
         ]
 
-        ctx = kis_model.AppContext(ticks=kis_model.TickState(view_q=self.consumer_queue['show_q']), feed=self.ws, orders=kis_model.OrderState())
-
-        ui = kis_controller.ScreenManager(ctx, view_q=self.consumer_queue['show_q'], screens=screens, parser=self.parser, on_quit=self.ws.stop)
+        app = kis_app.Application(ctx, view_q=self.consumer_queue['show_q'], controllers=controllers, parser=self.parser, on_quit=self.ws.stop)
         try:
-            threading.Thread(target=ui.start, daemon=True).start()
+            threading.Thread(target=app.start, daemon=True).start()
             self.logger.info("showing thread on.")
         except Exception as e:
             self.logger.error(f"Error in showing thread: {e}")

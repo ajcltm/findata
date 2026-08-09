@@ -218,8 +218,8 @@ class KisFeed:
         self._ack[sub.ack_key] = fut
         try:
             await ws.send(self.make_subscribe_msg("1", sub))
-            await asyncio.wait_for(fut, timeout=self.ACK_TIMEOUT)
             self._sub_status[sub.ack_key] = "대기 중"
+            await asyncio.wait_for(fut, timeout=self.ACK_TIMEOUT)
             self.log.info("구독 완료: %s %s", sub.tr_id, sub.tr_key)
             return True
         except asyncio.TimeoutError:
@@ -353,6 +353,7 @@ class KisFeed:
             if fut and not fut.done():
                 fut.set_result(body)
                 self._sub_status[(tr_id, tr_key)] = body.get("msg1", "unknown")
+                self.log.debug("구독 _sub_status: %s", self._sub_status[(tr_id, tr_key)])
             else:
                 self.log.debug("매칭 안 된 성공 응답: %s", raw[:200])
         else:

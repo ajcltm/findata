@@ -1,144 +1,97 @@
-"""
-뷰 — 화면은 자기가 쓸 상태만 읽는다.
+"""뷰 — (model, width) → 문자열 리스트.
 
-도메인 상태(틱·구독·주문)는 공유하고, 화면 상태(스크롤·필터)는 화면이
-소유한다. OrderScreen이 틱 통계를 스냅샷 뜰 이유는 없다.
+규칙 둘.
+    1. print 하지 않는다. 출력은 런타임이 한 번에 한다.
+    2. 조회하지 않는다. 여기서 네트워크를 타면 렌더 스레드가 멈춘다.
 """
 
 from __future__ import annotations
 
-import datetime
-import os
-import shutil
-import subprocess
+from datetime import datetime
 
-W = 74
-FOOTER = "  [h]home  [r]realdata  [o]orders  [q]quit"
+CLEAR = "\033[2J\033[H"
 
 
-def clear() -> None:
-    subprocess.run("cls" if os.name == "nt" else "clear", shell=True)
+def frame(title: str, body: list[str], hint: str,
+          flash: str | None, width: int) -> str:
+    """화면 공통 테두리. 모든 화면이 같은 골격을 쓴다."""
+    lines = [
+        f"[{title}]".ljust(max(0, width - 20)) + datetime.now().strftime("%H:%M:%S"),
+        "─" * width,
+        *body,
+        "─" * width,
+        hint,
+    ]
+    if flash:
+        lines.append(f"  » {flash}")
+    return CLEAR + "\n".join(lines)
 
 
-def header(title: str) -> None:
-    now = f"{datetime.datetime.now():%H:%M:%S}"
-    print("=" * W)
-    print(f"  {title}{' ' * max(1, W - len(title) - len(now) - 6)}{now}")
-    print("=" * W)
+def home(m, width: int) -> list[str]:
+    return [
+        f"  구독 종목   {m.subscribed}",
+        "",
+        "  [r] 실시간 시세   [o] 주문 내역   [s] 종목 구독 (s 005930)",
+    ]
 
 
-def cell(text, width: int) -> str:
-    """한글은 두 칸을 차지한다. 그냥 :<10을 쓰면 표가 어긋난다."""
-    text = "-" if text is None else str(text)
-    w = sum(2 if ord(c) > 0x2E80 else 1 for c in text)
-    if w > width:
-        out = ""
-        acc = 0
-        for c in text:
-            cw = 2 if ord(c) > 0x2E80 else 1
-            if acc + cw > width - 1:
-                return out + "…"
-            out += c
-            acc += cw
-    return text + " " * (width - w)
+def realdata(m, width: int) -> list[str]:
+    rows = m.rows()
+    # head = f"  {'종목':<8}{'현재가':>10}{'등락률':>9}{'거래량':>12}{'시각':>10}"
+    # out = [head, "  " + "-" * (len(head) - 2)]
+    # for t in rows:
+    #     sign = "▲" if t.chg_rate > 0 else ("▼" if t.chg_rate < 0 else " ")
+    #     out.append(f"  {t.code:<8}{t.price:>10,}"
+    #                f"{sign + f'{abs(t.chg_rate):.2f}%':>9}"
+    #                f"{t.volume:>12,}{t.ts:%H:%M:%S:>10}")
+    # if not m.total:
+    #     out.append("  수신된 시세가 없습니다.")
+    # out += ["", f"  {m.page_label}   정렬:{m.sort}"
+    #             + (f"   필터:{m.only}" if m.only else "")]
+    return rows
 
 
-# ── HOME ───────────────────────────────────────────────────────
-class HomeScreen:
-    name = "home"
-
-    def render(self, ctx) -> None:
-        subs = ctx.feed.subscription_status()          # 구독 + 틱만
-        t = ctx.ticks.snapshot()
-
-        clear()
-        header("HOME")
-        print(f"  엔진 시작: {t.start_time}   경과: {t.elapsed}   "
-              f"수신: {t.total_msgs:,}건")
-        if t.dropped:
-            print(f"  ⚠️  폐기 {t.dropped}건 — 파싱 실패 로그 확인 필요")
-        print("-" * W)
-        print(f"  {cell('구분', 12)}{cell('종목코드', 12)}상태")
-        print("  " + "-" * (W - 4))
-
-        if not subs:
-            print("  구독 정보 없음 (연결 대기 중)")
-        for row in subs:
-            print(f"  {cell(row[0], 12)}{cell(row[1], 12)}{row[2]}")
-
-        print("=" * W)
-        print(FOOTER)
+def detail(m, width: int) -> list[str]:
+    if not m.code:
+        return ["  종목이 지정되지 않았습니다."]
+    out = []
+    if m.asks or m.bids:
+        for p, q in reversed(m.asks):
+            out.append(f"  {'':>12}{p:>10,} │ {q:>8,}")
+        out.append("  " + "-" * 40)
+        for p, q in m.bids:
+            out.append(f"  {q:>8,} │ {p:>10,}")
+    else:
+        out.append("  호가 없음")
+    out += ["", "  최근 체결"]
+    for t in m.trades:
+        out.append(f"    {t.ts:%H:%M:%S}  {t.price:>10,}  {t.qty:>7,}")
+    return out
 
 
-# ── REALDATA ───────────────────────────────────────────────────
-class RealDataScreen:
-    name = "realdata"
-
-    def render(self, ctx) -> None:
-        s = ctx.ticks.snapshot()           # 틱만. 주문은 안 읽는다.
-
-        clear()
-        header("REALDATA")
-        print(f"  수신 {s.total_msgs:,}건   폐기 {s.dropped}건   "
-              f"대기열 {s.qsize}")
-        print(f"  최근 {s.last_time}  {s.last_kind or '-'}  "
-              f"{s.last_code or '-'}  price={s.last_price or '-'}")
-        print("-" * W)
-        if not s.recent_lines:
-            print("  수신 대기 중...")
-        for line in s.recent_lines:
-            print("  " + line)
-        print("-" * W)
-        print(FOOTER)
+def orders(m, width: int) -> list[str]:
+    rows = m.rows()
+    if m.loading and not m.total:
+        return ["", "  조회 중..."]
+    if m.error and not m.total:
+        return ["", f"  조회 실패: {m.error}", "  [u] 재시도"]
+    head = (f"  {'주문번호':<12}{'종목':<8}{'구분':<6}"
+            f"{'수량':>8}{'단가':>10}{'상태':>10}")
+    out = [head, "  " + "-" * (len(head) - 2)]
+    for o in rows:
+        out.append(f"  {o.order_no:<12}{o.code:<8}{o.side:<6}"
+                   f"{o.qty:>8,}{o.price:>10,}{o.status:>10}")
+    if not m.total:
+        out.append("  주문이 없습니다.")
+    out += ["", _status(m)]
+    return out
 
 
-# ── ORDERS ─────────────────────────────────────────────────────
-class OrderScreen:
-    name = "orders"
-
-    # 화면 상태는 화면이 소유한다. 다른 화면과 나눌 이유가 없다.
-    def __init__(self):
-        self.scroll = 0
-        self.page_size = max(5, (shutil.get_terminal_size().lines or 24) - 12)
-
-    def render(self, ctx) -> None:
-        s = ctx.orders.snapshot()          # 주문만
-
-        clear()
-        header("ORDERS")
-
-        if s.loading:
-            print("  조회 중...")          # 블로킹 없이 즉시 이 화면이 뜬다
-        elif s.error:
-            print(f"  ❌ 조회 실패: {s.error}")
-            print("  [o]를 눌러 다시 시도하세요.")
-        else:
-            self._table(s)
-
-        print("-" * W)
-        print("  [h]home  [r]realdata  [o]새로고침  [q]quit")
-
-    def _table(self, s) -> None:
-        print(f"  {cell('종목코드', 10)}{cell('구분', 8)}{cell('주문수량', 10)}"
-              f"{cell('체결수량', 10)}{cell('주문단가', 12)}시간")
-        print("-" * W)
-
-        if not s.rows:
-            print("  주문 내역이 없습니다.")
-            return
-
-        total = len(s.rows)
-        self.scroll = max(0, min(self.scroll, max(0, total - self.page_size)))
-        window = s.rows[self.scroll:self.scroll + self.page_size]
-
-        for o in window:
-            print(f"  {cell(o.get('pdno'), 10)}"
-                  f"{cell(o.get('sll_buy_dvsn_cd_name'), 8)}"
-                  f"{cell(o.get('ord_qty'), 10)}"
-                  f"{cell(o.get('tot_ccld_qty'), 10)}"
-                  f"{cell(o.get('ord_unpr'), 12)}"
-                  f"{o.get('ord_tmd', '-')}")
-
-        shown = f"{self.scroll + 1}-{self.scroll + len(window)}/{total}"
-        stamp = f"  조회 {s.fetched_at}" if s.fetched_at else ""
-        print(f"\n  {shown}{stamp}")
+def _status(m) -> str:
+    if m.loading:
+        return "  조회 중..."
+    if m.error:
+        return f"  조회 실패: {m.error}   [u] 재시도"
+    if m.loaded_at:
+        return f"  기준 {m.loaded_at:%H:%M:%S}"
+    return ""

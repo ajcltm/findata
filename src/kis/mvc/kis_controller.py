@@ -1,141 +1,146 @@
-"""
-컨트롤러 — 파싱 1회, 렌더 스레드 사망 방지, 입력 논블로킹.
+"""컨트롤러 — 입력을 받아 모델을 바꾸고, 필요하면 서비스를 부른다.
 
-스레드 구성
-    파서 스레드   raw_q → 파싱 1회 → view_q / record_q / trade_q 로 팬아웃
-    렌더 스레드   view_q 소진 → TickState 갱신 → 화면 1장
-    메인 스레드   input() 대기. 느린 작업은 절대 여기서 하지 않는다.
+모델도 문자열도 만들지 않는다. 자기 모델과 자기 뷰가 뭔지만 안다.
+핸들러 시그니처는 전부 (self, app, arg).
 """
 
 from __future__ import annotations
 
-import logging
-import queue
-import threading
-import time
-
-log = logging.getLogger("kis.ui")
+from kis.mvc import kis_model, kis_view
+from kis import kis_websocket
 
 
-class ParserWorker:
-    """
-    ⚠️ 기존 구조는 recording·trading·view가 각자 파싱했다. 같은 틱을
-       세 번, 체결통보는 AES 복호화까지 세 번이다. 파싱을 앞으로 당기고
-       결과를 나눠주면 한 번으로 끝난다.
-    """
+class Controller:
+    name: str = ""
+    title: str = ""
+    view = None                        # (model, width) -> list[str]
 
-    def __init__(self, raw_q, parser, out_queues: dict[str, queue.Queue]):
-        self.raw_q = raw_q
-        self.parser = parser
-        self.out_queues = out_queues
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+    def __init__(self, m):
+        self.model = m
+        self.keymap: dict[str, callable] = {}
 
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._loop, name="parser",
-                                        daemon=True)
-        self._thread.start()
+    def on_enter(self, app, **opts) -> None:
+        """스택에 올라올 때. 무거운 조회는 반드시 app.submit으로."""
 
-    def stop(self) -> None:
-        self._stop.set()
+    def on_exit(self) -> None:
+        """스택에서 내려갈 때."""
 
-    def _loop(self) -> None:
-        while not self._stop.is_set():
+    def render(self, width: int) -> list[str]:
+        return type(self).view(self.model, width)
+
+    def hint(self) -> str:
+        keys = list(self.keymap) + ["h", "r", "o", "b", "q"]
+        return "  " + "  ".join(f"[{k}]" for k in keys)
+
+
+class PagedKeys:
+    """j/k/g. 계산은 모델이 한다."""
+
+    def __init__(self, m):
+        super().__init__(m)
+        self.keymap.update({
+            "j": lambda app, arg: self.model.down(),
+            "k": lambda app, arg: self.model.up(),
+            "g": lambda app, arg: self.model.top(),
+        })
+
+
+# ── 화면별 ─────────────────────────────────────────────────────
+class HomeController(Controller):
+    name, title = "home", "홈"
+    view = staticmethod(kis_view.home)
+
+    def __init__(self, ctx):
+        super().__init__(kis_model.Home(ctx))
+        self.keymap["s"] = self._subscribe
+
+    def _subscribe(self, app, arg):
+        """종목 구독"""
+        if not arg:
+            app.ctx.flash("사용법: s 005930")
+            return
+        app.submit(f"{arg} 구독",
+                   lambda: app.ctx.ws._subscribe_one(kis_websocket.Subscription(app.ctx.ws.tr_price, arg)),
+                   lambda _: app.ctx.flash(f"{arg} 구독 완료"))
+
+
+class RealDataController(PagedKeys, Controller):
+    name, title = "realdata", "실시간 시세"
+    view = staticmethod(kis_view.realdata)
+
+    def __init__(self, ctx):
+        super().__init__(kis_model.RealData(ctx))
+        self.keymap.update({"s": self._sort, "f": self._filter,
+                            "d": self._detail})
+
+    def _sort(self, app, arg):
+        """정렬 전환"""
+        self.model.next_sort()
+
+    def _filter(self, app, arg):
+        """필터 (f 005 / f 로 해제)"""
+        self.model.only = arg or None
+        self.model.top()
+
+    def _detail(self, app, arg):
+        """종목 상세 (d 005930)"""
+        if not arg:
+            app.ctx.flash("사용법: d 005930")
+            return
+        app.goto("detail", replace=False, code=arg)
+
+
+class DetailController(Controller):
+    name, title = "detail", "종목 상세"
+    view = staticmethod(kis_view.detail)
+
+    def __init__(self, ctx):
+        super().__init__(kis_model.Detail(ctx))
+
+    def on_enter(self, app, code=None, **opts):
+        self.model.code = code
+        self.title = f"종목 상세 {code}"
+
+    def on_exit(self):
+        self.model.code = None
+
+
+class OrdersController(PagedKeys, Controller):
+    name, title = "orders", "주문 내역"
+    view = staticmethod(kis_view.orders)
+
+    def __init__(self, ctx, order_api):
+        super().__init__(kis_model.Orders(ctx))
+        self.api = order_api                    # 서비스
+        self.keymap["u"] = self._refresh
+
+    def on_enter(self, app, account=None, **opts):
+        self.model.account = account
+        self.model.top()
+        self._load(app)                 # 화면은 이미 떠 있고 조회만 뒤따른다
+
+    def _refresh(self, app, arg):
+        """새로고침"""
+        self._load(app)
+
+    def _load(self, app):
+        m = self.model
+        m.begin()
+
+        def _run():
             try:
-                tick = self.raw_q.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                parsed = self.parser.parse(tick)
-                if parsed is None:            # 파서는 실패 시 None을 준다
-                    continue
-                for name, q in self.out_queues.items():
-                    try:
-                        q.put_nowait(parsed)
-                    except queue.Full:
-                        log.warning("[%s] 큐 포화, 드롭", name)
-            except Exception:
-                log.exception("파서 스레드 예외, 건너뜀")
-            finally:
-                self.raw_q.task_done()
+                return self.api.list_orders(m.account)
+            except Exception as e:
+                m.fail(str(e))          # ※ 워커 스레드 (기존 동작 유지)
+                raise
+
+        app.submit("주문 조회", _run, m.done)   # m.done은 렌더 스레드에서
 
 
-class ScreenManager:
-    def __init__(self, ctx, view_q, screens, parser, start="home", interval=1.0, on_quit=None):
-        self.ctx = ctx
-        self.view_q = view_q
-        self.screens = {s.name: s for s in screens}
-        self.parser = parser
-        self.current = self.screens[start]
-        self.interval = interval
-        self.on_quit = on_quit
-        self._stop = threading.Event()
-
-    # ── 실행 ───────────────────────────────────────────────────
-    def start(self) -> None:
-        threading.Thread(target=self._render_loop, name="render",
-                         daemon=True).start()
-        self._input_loop()
-
-    # ── 렌더 ───────────────────────────────────────────────────
-    def _render_loop(self) -> None:
-        while not self._stop.is_set():
-            # ⚠️ 이 try가 없으면 파싱 실패 한 건에 렌더 스레드가 죽는다.
-            #    daemon=True라 프로그램은 살아 있고 화면만 그 순간에 멈춘다.
-            #    사용자는 장이 조용한 줄 알게 된다 — 최악의 실패 방식이다.
-            try:
-                self._drain()
-                self.current.render(self.ctx)
-            except Exception:
-                log.exception("렌더 실패, 다음 프레임에서 재시도")
-            self._stop.wait(self.interval)     # sleep보다 종료가 즉시 먹는다
-
-    def _drain(self, max_items: int = 5000) -> None:
-        """큐는 흐름, 화면은 순간. 한 프레임에 쌓인 만큼을 접는다."""
-        for _ in range(max_items):
-            try:
-                tick = self.view_q.get_nowait()
-            except queue.Empty:
-                return
-            try:
-                parsed = self.parser.parse(tick)
-                if parsed is None:
-                    continue
-                self.ctx.ticks.on_parsed(parsed)
-            finally:
-                self.view_q.task_done()
-
-    # ── 입력 ───────────────────────────────────────────────────
-    def _input_loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                k = input().strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                self._quit()
-                break
-
-            if k == "h":
-                self.current = self.screens["home"]
-            elif k == "r":
-                self.current = self.screens["realdata"]
-            elif k == "o":
-                # 화면부터 바꾸고 조회는 뒤로 던진다. 여기서 REST를 부르면
-                # 응답이 올 때까지 입력이 멈춰, 눌러도 반응 없는 것처럼 보인다.
-                self.current = self.screens["orders"]
-                self._fetch_orders_async()
-            elif k in ("j", "k") and hasattr(self.current, "scroll"):
-                self.current.scroll += self.current.page_size if k == "j" \
-                    else -self.current.page_size
-            elif k == "q":
-                self._quit()
-                break
-
-    def _quit(self) -> None:
-        """렌더/입력 루프를 세우고, 엔진(웹소켓 등)도 같이 종료시킨다."""
-        self._stop.set()
-        print("\n종료합니다...")
-        if self.on_quit is not None:
-            try:
-                self.on_quit()
-            except Exception:
-                log.exception("종료 콜백 실패")
+def build_controllers(ctx, order_api) -> list[Controller]:
+    return [
+        HomeController(ctx),
+        RealDataController(ctx),
+        DetailController(ctx),
+        OrdersController(ctx, order_api),
+    ]
