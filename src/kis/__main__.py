@@ -18,6 +18,6 @@ if __name__ == "__main__":
     # simul_engine.add_strategy(test_st.KisOvernightMomentumStrategy)
     # simul_engine.run(recording=True, trading=True, show=False)
 
-    engine = kis_engine.KiSEngine(price_codes=price_codes, orderbook_codes=orderbook_codes, simul_mode=True)
+    engine = kis_engine.KiSEngine(price_codes=price_codes, orderbook_codes=orderbook_codes, simul_mode=False)
     # engine.add_strategy(test_st.KisOvernightMomentumStrategy)
     engine.run(recording=True, trading=False, show=True)

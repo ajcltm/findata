@@ -200,13 +200,13 @@ class KISParser:
             body = tick.payload
             if tick.encrypted:
                 body = self.decrypt(key=tick.key, iv=tick.iv, cipher_text_b64=body)
-            records = [cls(*chunk, datetime=self.now())
+            records = [cls(*chunk[:cls.N_FIELDS], datetime=self.now())
                        for chunk in self.chunks(body, tick.count, cls)]
             return ParsedTick(tr_id=tick.tr_id, data=records)
 
         except Exception as e:
             # payload 전체를 로그에 남기면 체결통보의 계좌정보가 평문으로 남는다.
-            self.logger.error("파싱 실패 tr_id=%s count=%s: %s | %.120s",
+            self.logger.error("파싱 실패 tr_id=%s count=%s: %s | %s",
                               tick.tr_id, tick.count, e, tick.payload)
             return None
 
@@ -226,17 +226,29 @@ class KISParser:
         self._check_size(size, cls)
         return [fields[i * size:(i + 1) * size] for i in range(n)]
 
+    # @staticmethod
+    # def _check_size(size: int, cls) -> None:
+    #     """
+    #     여기서 막지 않으면 필드가 한 칸씩 밀린 채 통과한다.
+    #     가격 자리에 거래량이 들어가도 프로그램은 멀쩡히 돈다 — 최악의 경우다.
+    #     """
+    #     expected = cls.N_FIELDS
+    #     if expected is not None and size < expected:
+    #         raise ParseError(f"{cls.__name__} 필드 {size}개 (최소 {expected}개 필요)")
+
+    #     # 전문 필드 + recv_at(파서가 채움) 이므로 -1
+    #     capacity = len(dc_fields(cls)) - 1
+    #     if size > capacity:
+    #         raise ParseError(f"{cls.__name__} 정의 {capacity}칸에 {size}개 못 담음")
+
     @staticmethod
     def _check_size(size: int, cls) -> None:
-        """
-        여기서 막지 않으면 필드가 한 칸씩 밀린 채 통과한다.
-        가격 자리에 거래량이 들어가도 프로그램은 멀쩡히 돈다 — 최악의 경우다.
-        """
         expected = cls.N_FIELDS
-        if expected is not None and size != expected:
-            raise ParseError(f"{cls.__name__} 필드 {size}개 (기대 {expected}개)")
+        if expected is not None:
+            if size < expected:
+                raise ParseError(f"{cls.__name__} 필드 {size}개 (최소 {expected}개 필요)")
+            return
 
-        # 전문 필드 + recv_at(파서가 채움) 이므로 -1
         capacity = len(dc_fields(cls)) - 1
         if size > capacity:
             raise ParseError(f"{cls.__name__} 정의 {capacity}칸에 {size}개 못 담음")
