@@ -51,9 +51,9 @@ class KisRecorder:
                         order_book_batch.extend(parsed_tick.data)  # Extend batch with tick data (assuming tick is a list)
 
                     if parsed_tick.tr_id == "H0STCNI0":
-                        file_name = "new_order"
+                        file_name = "new_notice"
                         if self.test_mode:
-                            file_name = "simul_order"
+                            file_name = "simul_notice"
                         order_batch.extend(parsed_tick.data)
                     self.save_q.task_done()
                 except Empty:

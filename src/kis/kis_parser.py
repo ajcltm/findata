@@ -133,35 +133,38 @@ class OrderBook:
 # ── 체결 통보 H0STCNI0 ──────────────────────────────────────────
 @dataclass(slots=True)
 class Notice:
-    customer_id: str                 # CUST_ID 고객ID
-    account_no: str                  # ACNT_NO 계좌번호
-    order_no: str                    # ODER_NO 주문번호
-    org_order_no: str                # OODER_NO 원주문번호
-    side: str                        # SELN_BYOV_CLS 매도매수구분
-    correction_type: str             # RCTF_CLS 정정구분
-    order_type: str                  # ODER_KIND 주문종류
-    order_condition: str             # ODER_COND 주문조건
-    stock_code: str                  # STCK_SHRN_ISCD 종목코드
-    executed_qty: str                # CNTG_QTY 체결수량
-    executed_price: str              # CNTG_UNPR 체결단가
-    execution_time: str              # STCK_CNTG_HOUR 체결시간
-    is_rejected: str                 # RFUS_YN 거부여부
-    is_executed: str                 # CNTG_YN 체결여부
-    is_accepted: str                 # ACPT_YN 접수여부
-    branch_no: str                   # BRNC_NO 지점번호
-    order_qty: str                   # ODER_QTY 주문수량
-    account_name: str                # ACNT_NAME 계좌명
-    stock_name: str                  # CNTG_ISNM40 체결종목명
-    credit_cls: str                  # CRDT_CLS 신용구분
-    credit_loan_date: str            # CRDT_LOAN_DATE 신용대출일자
-    stock_name40: str                # CNTG_ISNM40 체결종목명40
-    order_price: str                 # ODER_PRC 주문가격
+    CUST_ID: str    #고객 ID
+    ACNT_NO: str    #계좌번호
+    ODER_NO: str    #주문번호
+    OODER_NO: str    #원주문번호
+    SELN_BYOV_CLS: str    #매도매수구분
+    RCTF_CLS: str    #정정구분
+    ODER_KIND: str    #주문종류
+    ODER_COND: str    #주문조건
+    STCK_SHRN_ISCD: str    #주식 단축 종목코드
+    CNTG_QTY: str    #체결 수량
+    CNTG_UNPR: str    #체결단가
+    STCK_CNTG_HOUR: str    #주식 체결 시간
+    RFUS_YN: str    #거부여부
+    CNTG_YN: str    #체결여부
+    ACPT_YN: str    #접수여부
+    BRNC_NO: str    #지점번호
+    ODER_QTY: str    #주문수량
+    ACNT_NAME: str    #계좌명
+    ORD_COND_PRC: str    #호가조건가격
+    ORD_EXG_GB: str    #주문거래소 구분
+    POPUP_YN: str    #실시간체결창 표시여부
+    FILLER: str    #필러
+    CRDT_CLS: str    #신용구분
+    CRDT_LOAN_DATE: str    #신용대출일자
+    CNTG_ISNM40: str    #체결종목명
+    ODER_PRC: str    #주문가격
     datetime: str = ""
 
     # ⚠️ 체결통보는 계정 유형(실전/모의)에 따라 필드 수가 다르다는 보고가 있다.
     #    None이면 개수 검증을 건너뛰고 앞에서부터 채운다. 실제 전문을 한 번
     #    찍어보고 확정한 뒤 숫자를 넣는 것을 권장.
-    N_FIELDS: ClassVar[int | None] = None
+    N_FIELDS: ClassVar[int] = 26
     INT_FIELDS: ClassVar[tuple[str, ...]] = ("executed_qty", "executed_price",
                                              "order_qty", "order_price")
     FLOAT_FIELDS: ClassVar[tuple[str, ...]] = ()
@@ -195,7 +198,7 @@ class KISParser:
         if cls is None:
             self.logger.warning("알 수 없는 TR ID: %s", tick.tr_id)
             return None
-
+        
         try:
             body = tick.payload
             if tick.encrypted:
@@ -207,7 +210,7 @@ class KISParser:
         except Exception as e:
             # payload 전체를 로그에 남기면 체결통보의 계좌정보가 평문으로 남는다.
             self.logger.error("파싱 실패 tr_id=%s count=%s: %s | %s",
-                              tick.tr_id, tick.count, e, tick.payload)
+                              tick.tr_id, tick.count, e, tick)
             return None
 
     # ── 레코드 분할 ────────────────────────────────────────────
