@@ -370,8 +370,15 @@ class KisFeed:
                 self.log.warning("수신 큐 포화, 누적 드롭 %d건", self._dropped)
 
     async def _pump(self) -> None:
+        pumped = 0
         while True:
             tick = await self._raw_q.get()
+            pumped += 1
+            # 데이터가 실제로 들어오는지 확인하는 지점 — 접속·구독 로그만으로는
+            # "연결은 됐는데 틱이 안 온다"를 구별할 수 없다.
+            if pumped == 1 or pumped % 20 == 0:
+                self.log.info("수신 틱 누적 %d건 (최근 tr_id=%s, %s건)",
+                              pumped, tick.tr_id, tick.count)
             for name, q in self.consumer_queues.items():
                 try:
                     q.put_nowait(tick)

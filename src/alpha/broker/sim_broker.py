@@ -52,8 +52,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from events import MarketEvent
-from trading import (EPS, Broker, Fill, Order, OrderStatus, OrderType,
+from alpha.events.events import MarketEvent
+from alpha.trader.trading import (EPS, Broker, Fill, Order, OrderStatus, OrderType,
                      Position, Side)
 
 log = logging.getLogger("sim")

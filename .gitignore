@@ -168,4 +168,4 @@ fabric.properties
 data/
 *.db
 *.json          # token.json 등 모든 JSON 인증 파일 제외
-token.json
+**/*token*.json

@@ -35,9 +35,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from events import Bar, EventRouter, MarketEvent, Quote, Subscription, Tick
-from portfolio import PortfolioBroker, StrategyBroker
-from trading import Broker, Fill, Order, Strategy, Trader
+from alpha.events.events import Bar, EventRouter, MarketEvent, Quote, Subscription, Tick
+from alpha.broker.portfolio_broker import PortfolioBroker, StrategyBroker
+from alpha.trader.trading import Broker, Fill, Order, Strategy, Trader
 
 log = logging.getLogger(__name__)
 
@@ -163,13 +163,16 @@ class Engine:
     """
 
     def __init__(self, real_broker: Broker, dry_run: bool = True,
-                 state_dir: str | None = None):
+                 state_dir: str | None = None, recorder=None):
         self.portfolio = PortfolioBroker(real_broker)
         self.router = EventRouter()
         self.bars = BarFactory()
         self.slots: dict[str, Slot] = {}
         self.dry_run = dry_run
         self.state_dir = state_dir
+        # 전략별 Trader 에 그대로 물려준다. IndicatorSnapshot 저장용
+        # (Recorder|None) — None 이면 지표를 기록하지 않는다.
+        self.recorder = recorder
 
     # ───────── 등록 ─────────
     def add(self, strategy_id: str, strategy: Strategy,
@@ -206,7 +209,8 @@ class Engine:
         trader = Trader(broker=view, strategy=strategy, warmup=warmup,
                         dry_run=self.dry_run,
                         state_path=(f"{self.state_dir}/{strategy_id}.json"
-                                    if self.state_dir else None))
+                                    if self.state_dir else None),
+                        strategy_id=strategy_id, recorder=self.recorder)
 
         subs = [Subscription(s, "tick") for s in ticks]
         subs += [Subscription(s, "quote") for s in quotes]

@@ -270,7 +270,7 @@ class Recorder:
             if ch.extra:
                 # 객체에 없는 공통 컬럼(strategy_id 등)을 붙인다.
                 # extra 가 없으면 객체 리스트를 그대로 넘겨 변환을 아낀다.
-                from sinks import _to_row
+                from alpha.recording.sinks import _to_row
                 batch = [{**_to_row(r), **ch.extra} for r in batch]
             ch.sink.write(batch, ch.name)
             ch.written += len(batch)

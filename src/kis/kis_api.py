@@ -379,6 +379,12 @@ def query_av_sell(code):
     r = requests.get(url, headers=headers, params=params, timeout=10)
     return r.json()
 
+def place_order(symbol, side, qty, price):
+    if side == "buy":
+        return buy(symbol, qty, price)
+    elif side == "sell":
+        return sell(symbol, qty, price)
+
 def buy(code, qty, price='0'):
     """
     [주식주문(현금)]

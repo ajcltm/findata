@@ -30,8 +30,9 @@ import threading
 from datetime import datetime, timedelta
 
 # 공통 계층에서 가져온다. 이 파일은 trading.py 에만 의존한다.
-from trading import (Bar, Broker, Fill, Order, OrderStatus, OrderType,
+from alpha.trader.trading import (Broker, Fill, Order, OrderStatus, OrderType,
                      Position, Side, Strategy, Trader)
+from kis import kis_api
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +71,7 @@ class KISBroker(Broker):
          api.fetch_open_orders() -> [{...}]
     """
 
-    def __init__(self, api, account: str):
-        self.api = api                              # REST 래퍼
-        self.account = account                      # 계좌번호
+    def __init__(self):
 
         # ── 계좌 상태의 로컬 복제본 ──────────────────────────
         # 전부 '증권사 서버 상태의 그림자'다. 원본은 저쪽에 있다.
@@ -179,7 +178,7 @@ class KISBroker(Broker):
         # 락을 놓고 호출한다. 네트워크 I/O 는 수백 ms 가 걸릴 수 있는데
         # 그동안 락을 쥐고 있으면 소켓 스레드가 통째로 멈춘다.
         try:
-            broker_id = self.api.place_order(
+            broker_id = kis_api.place_order(
                 symbol=order.symbol,
                 side=order.side.value,                          # "buy" / "sell"
                 qty=int(order.size),                            # KIS는 정수 수량만

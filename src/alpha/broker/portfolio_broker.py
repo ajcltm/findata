@@ -42,7 +42,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from trading import (EPS, Broker, Fill, Order, OrderStatus, Position, Side,
+from alpha.trader.trading import (EPS, Broker, Fill, Order, OrderStatus, Position, Side,
                      TradeTracker)
 
 log = logging.getLogger(__name__)

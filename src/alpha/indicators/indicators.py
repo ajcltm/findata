@@ -38,7 +38,7 @@ import inspect
 from collections import deque
 from typing import Optional
 
-from events import Bar, MarketEvent, Quote, Tick
+from alpha.events.events import Bar, MarketEvent, Quote, Tick
 
 
 class Indicator:

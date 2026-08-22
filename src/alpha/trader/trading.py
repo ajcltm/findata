@@ -37,7 +37,7 @@ from typing import Callable, Optional
 
 # Bar/Tick/Quote 는 이벤트 계층에 있다. events.py 는 trading.py 를
 # import 하지 않으므로 순환이 생기지 않는다.
-from events import Bar, MarketEvent, Quote, Tick
+from alpha.events.events import Bar, MarketEvent, Quote, Tick
 
 log = logging.getLogger(__name__)
 
@@ -1062,7 +1062,8 @@ class Trader:
 
     def __init__(self, broker: Broker, strategy: Strategy,
                  warmup: int = 0, dry_run: bool = True,
-                 state_path: str | None = None):
+                 state_path: str | None = None,
+                 strategy_id: str = "", recorder=None):
         self.raw_broker = broker            # 어댑터가 내부 상태에 접근할 때 씀
         # 전략에게는 감싼 것을 준다. 킬스위치가 우회되지 않도록.
         self.broker = GuardBroker(broker, enabled=False, dry_run=dry_run)
@@ -1070,6 +1071,11 @@ class Trader:
         self.strategy = strategy
         strategy.broker = self.broker       # ★ 주입은 여기 두 줄이 전부
         strategy.trader = self
+
+        self.strategy_id = strategy_id
+        # IndicatorSnapshot 저장용. None 이면 기록하지 않는다(백테스트에서
+        # 매번 새 recorder 를 만들 필요가 없도록 옵션으로 둔다).
+        self.recorder = recorder
 
         self.tracker = TradeTracker()
         self.warmup = warmup                # 이 봉 수까지는 on_bar 를 안 부른다
@@ -1173,6 +1179,9 @@ class Trader:
         #    틱 전략의 워밍업은 지표의 ready 가 대신 막아준다.
         if ev.kind == "bar":
             self._bars += 1
+            # 워밍업 구간도 남긴다 — 지표가 데워지는 과정 자체가
+            # 사후 검증(차트 재현) 대상이다.
+            self._record_indicators(ev)
             if self._bars <= self.warmup:
                 return
 
@@ -1234,6 +1243,20 @@ class Trader:
             self._safe(self.strategy.on_timer, now)
 
     # ───────── 내부 ─────────
+    def _record_indicators(self, ev: MarketEvent):
+        """지금 지표 값을 IndicatorSnapshot(long 포맷)으로 recorder 에 남긴다.
+
+        ev.dt 를 쓰는 이유: 기록 시각이 아니라 '그 봉 시각'이어야 재생·조인이
+        맞는다. recorder=None 이면(기록을 안 켰거나 백테스트에서 끈 경우)
+        아무 일도 하지 않는다."""
+        if self.recorder is None:
+            return
+        for label, value in self.strategy.indicator_snapshot().items():
+            self.recorder.put(IndicatorSnapshot(
+                dt=ev.dt, strategy_id=self.strategy_id, symbol=ev.symbol,
+                label=label, line="", value=value, trigger="bar",
+            ))
+
     def _safe(self, fn, *args):
         """전략이 터져도 엔진은 살아있어야 한다.
 

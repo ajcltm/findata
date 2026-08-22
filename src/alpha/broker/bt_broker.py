@@ -34,9 +34,9 @@ from datetime import datetime
 
 import backtrader as bt
 
-from engine import Engine
-from events import Bar
-from trading import (Broker, Fill, Order, OrderStatus, OrderType,
+from alpha.engine.engine import Engine
+from alpha.events.events import Bar
+from alpha.trader.trading import (Broker, Fill, Order, OrderStatus, OrderType,
                      Position, Side, Strategy, Trader)
 
 log = logging.getLogger(__name__)
