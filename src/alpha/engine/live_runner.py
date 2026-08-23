@@ -39,6 +39,8 @@ from datetime import date, datetime
 from queue import Empty, Queue
 from typing import Callable, Optional
 
+from kis.kis_websocket import SENTINEL
+
 from alpha.engine.engine import Engine
 from alpha.trader.killswitch import KillSwitch
 from alpha.events.events import MarketEvent, parse_hhmmss
@@ -68,13 +70,15 @@ class LiveRunner:
         전략·지표·손익계산·기록은 전부 그대로다.
     """
 
-    def __init__(self, engine, trading_q: Queue, broker=None,
+    def __init__(self, engine, trading_q: Queue, view_q: Queue, broker=None,
                  test_mode: bool = True,
                  dry_run: bool = True,
                  business_date: Optional[date] = None,
                  kill_file: str = "./STOP_TRADING"):
         self.trading_q = trading_q
+        self.view_q = view_q
         self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
         self.test_mode = test_mode
         self.engine = engine               # 이름은 기존과 맞추되 의미는 '팩토리'
         self.on_date = business_date        # 재생 시 필요. None 이면 오늘
@@ -95,14 +99,14 @@ class LiveRunner:
             log.warning("전략 팩토리가 없습니다. trading() 종료.")
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self.trading, daemon=True,
+        self._thread = threading.Thread(target=self.roop, daemon=True,
                                         name="recorder")
         self._thread.start()
         log.info("LiveRunner 스레드 기동")
     # ═══════════════════════════════════════════════════════
     # KisTrader.trading() 자리
     # ═══════════════════════════════════════════════════════
-    def trading(self):
+    def roop(self):
 
         # 체결 알림은 별도 배선이 필요 없다.
         # 체결통보(H0STCNI0)가 trading_q 로 들어와 _handle_notice 가 처리한다.
@@ -117,9 +121,15 @@ class LiveRunner:
                  len(self.engine.slots), self.engine.trading_status())
 
         consumed = 0
-        while not self._stop.is_set():
+        while True:
             try:
                 raw = self.trading_q.get(timeout=0.2)
+                # MarketEvent(Tick/Quote)와 거기서 파생되는 Bar는 이제
+                # engine.feed() 가 직접 view_q 로 흘린다 — 여기서 또 넣으면
+                # 화면에 같은 이벤트가 두 번 뜬다. 체결통보처럼 engine.feed()
+                # 를 거치지 않는 것들만(SENTINEL 포함) 여기서 예외로 넣는다.
+                if not isinstance(raw, MarketEvent):
+                    self.view_q.put(raw)
                 if raw:
                     consumed += 1
                     if consumed == 1 or consumed % 20 == 0:
@@ -131,10 +141,35 @@ class LiveRunner:
             except Exception:
                 log.exception("틱 처리 실패 — 루프는 계속")
 
+            # 정지 요청이 와도 trading_q가 빌 때까지는 계속 돈다 — 종료
+            # 순간 이미 큐에 들어와 있던 실시간 이벤트/체결통보를 전략에
+            # 못 넘기고 버리는 일이 없도록 한다.
+            if self._stop.is_set() and self.trading_q.empty():
+                break
+
             self._periodic()
 
         self.engine.stop()                  # 상태 저장
         log.info("EngineTrader 종료 — 총 %d건 소비", consumed)
+
+    # ═══════════════════════════════════════════════════════
+    # 종료 — trading_q를 마저 비운 뒤에 스레드를 세운다
+    # ═══════════════════════════════════════════════════════
+    def stop(self, timeout: float = 5.0):
+        """정상 종료 요청. roop()가 trading_q를 다 비울 때까지 스스로 돌다가
+        멈추므로, 이미 들어와 있던 이벤트는 유실 없이 engine.feed까지 간다.
+
+        이미 멈춘 뒤 다시 불러도 안전하다(멱등)."""
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            log.warning("LiveRunner 정지 시간 초과(%.1fs) — trading_q 잔여 %d건은 "
+                        "다음 종료 시도까지 유실될 수 있음", timeout, self.trading_q.qsize())
+        else:
+            self._thread = None
+            log.info("LiveRunner 정상 종료 완료")
 
     # ═══════════════════════════════════════════════════════
     # 큐에서 꺼낸 원본 하나를 처리
@@ -148,7 +183,14 @@ class LiveRunner:
             KiSEngine.market_event_queue 는 가격/호가만 MarketEvent 로 변환하고
             체결통보는 흘리지 않는다. SimBroker 가 trading_q 에 직접 넣는
             체결통보 객체만 여기서 받는다 — 실전 체결통보 경로가 필요해지면
-            KiSEngine 쪽에 별도 큐를 추가해야 한다."""
+            KiSEngine 쪽에 별도 큐를 추가해야 한다.
+
+        ■ SENTINEL(kis_websocket)도 여기로 들어온다
+            KiSEngine이 웹소켓 종료 시 trading_q(=market_event_queue) 끝에
+            흘려보내는 종료 표식이다 — 처리할 이벤트가 아니므로 조용히 지나간다."""
+        if ev is SENTINEL:
+            log.debug("trading_q 종료 표식(SENTINEL) 수신")
+            return
         if self._is_notice(ev):
             log.debug("체결통보 수신 → _handle_notice")
             self._handle_notice(ev)

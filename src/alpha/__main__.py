@@ -17,6 +17,13 @@
 ■ 세 실행 경로가 같은 전략 조합을 쓴다
     build_trader() 하나만 세 경로 모두에 넘긴다. 그래야 백테스트 성과와
     실전/모의 성과가 같은 조건을 재는 것이 된다.
+
+■ 레코더 구독 / 뷰 구독도 이 파일 한 곳에서 정한다
+    무엇을 어디에 저장할지(레코더), 콘솔에서 무엇을 몇 번 키로 볼지(뷰)는
+    kis_engine.py/alphatrader.py 안에 숨어 있지 않다 — build_trader() 가
+    trader.add_recording()/trader.add_view() 로 등록하고, build_recording()
+    이 kis.recorder(원본 틱)를 등록한다. live/sim 둘 다 이 등록을 그대로
+    쓴다(백테스트는 KiSEngine이 없어서 build_recording() 은 안 쓴다).
 """
 
 from __future__ import annotations
@@ -29,11 +36,16 @@ from pathlib import Path
 
 from kis import kis_config
 from kis import kis_logger
+from kis import kis_parser
 from kis.kis_engine import KiSEngine
 
 from alpha.alphatrader.alphatrader import AlphaTrader
+from alpha.events import events
+from alpha.recording.sinks import SqliteSink
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
+from alpha.trader.trading import IndicatorSnapshot
+from alpha.view import model
 
 log = logging.getLogger("main")
 
@@ -61,13 +73,13 @@ def setup_logging(mode: str, verbose: bool) -> Path:
     file_handler = logging.FileHandler(log_path, encoding="utf-8")
     file_handler.setFormatter(fmt)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(fmt)
+    # console_handler = logging.StreamHandler()
+    # console_handler.setFormatter(fmt)
 
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
     root.addHandler(file_handler)
-    root.addHandler(console_handler)
+    # root.addHandler(console_handler)
 
     kis_logger.setup_logger(kis_config.LOG_DIR)   # kis 전용 로거(kis.log)도 그대로 유지
 
@@ -78,7 +90,7 @@ def setup_logging(mode: str, verbose: bool) -> Path:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 1. 전략 등록 — 세 실행 경로의 유일한 공통 정의
+# 1. 전략 + 레코더 + 뷰 등록 — 세 실행 경로의 유일한 공통 정의
 # ═══════════════════════════════════════════════════════════════════
 
 def build_trader() -> AlphaTrader:
@@ -90,7 +102,39 @@ def build_trader() -> AlphaTrader:
     trader.add_strategy("호가감시", SpreadWatcher(),
                         allocation=0,                # 주문 안 내므로 0
                         quotes=[SYMBOL])
+
+    # ── 레코더 구독 — AlphaTrader(Engine)가 만들어내는 파생 데이터를 어디에
+    #    저장할지. 원본 Tick/Quote/Notice는 build_recording(kis)가 이미
+    #    kis_data.db에 저장하므로 여기서 또 저장하지 않는다(중복 방지) —
+    #    Bar/IndicatorSnapshot은 Engine.feed()/Trader 안에서만 만들어지는
+    #    데이터라 여기가 유일한 저장 지점이다.
+    alpha_sink = SqliteSink(str(kis_config.DATA_DIR / "alpha_data.db"))
+    trader.add_recording(IndicatorSnapshot, alpha_sink, name="indicator")
+    trader.add_recording(events.Bar, alpha_sink, name="bar")
+    trader.add_recording(events.Tick, alpha_sink, name="tick")
+    trader.add_recording(events.Quote, alpha_sink, name="quote")
+
+    # ── 콘솔 뷰 구독 — 등록 순서가 곧 'v' 화면의 숫자키(1,2,3...) ──
+    trader.add_view(events.Tick, model.Board(cols=["price", "volume"]),
+                    name="시세판")
+    trader.add_view(events.Quote, model.Latest(), name="호가")
+    trader.add_view(events.Bar, model.Recent(20, cols=[
+        "symbol", "open", "high", "low", "close", "volume"]), name="봉")
+    trader.add_view(IndicatorSnapshot, model.Pivot(), name="지표")
     return trader
+
+
+def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
+    """KiSEngine이 만드는 원본 틱/이벤트를 어디에 저장할지 등록한다.
+
+    live/sim 에서만 부른다 — 백테스트는 KiSEngine 자체가 없다.
+    kis.run() 이 스레드를 켜기 전(=아직 데이터가 안 들어오는 동안)에
+    끝내면 되므로, 여기서 등록하고 바로 kis.run() 을 부르면 된다."""
+    db_name = "kis_data_sim.db" if simul_mode else "kis_data.db"
+    sink = SqliteSink(str(kis_config.DATA_DIR / db_name))
+    kis.recorder.subscribe(kis_parser.Execution, sink, name="execution")
+    kis.recorder.subscribe(kis_parser.OrderBook, sink, name="orderbook")
+    kis.recorder.subscribe(kis_parser.Notice, sink, name="notice")
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -98,25 +142,41 @@ def build_trader() -> AlphaTrader:
 # ═══════════════════════════════════════════════════════════════════
 
 def run_live(dry_run: bool):
+    simul_mode = False
     log.info("run_live 시작 (dry_run=%s)", dry_run)
-    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=False)
+    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=simul_mode)
+    build_recording(kis, simul_mode=simul_mode)
     trader = build_trader()
 
-    trader.run_live(kis.market_event_queue, dry_run=dry_run)
+    # on_quit=kis.stop : 콘솔에서 'q'를 누르면 웹소켓만 세운다.
+    # 그래야 아래 kis.run()의 블로킹이 풀리고, 다운스트림 드레인·flush는
+    # 여기(메인 스레드)에서 kis.run() 리턴 뒤에 마저 처리한다 —
+    # 뷰가 뜬 daemon 스레드에서 다 끝내려 하면, 메인 스레드가 먼저 빠져나가
+    # daemon 스레드가 중간에 죽어 마지막 몇 건이 유실될 수 있다.
+    runner = trader.run_live(kis.market_event_queue, dry_run=dry_run, on_quit=kis.stop)
 
     # trading/show 는 KiSEngine 자체 기능이라 여기선 안 쓴다 —
     # 주문 경로는 이미 AlphaTrader.run_live() 가 맡았다.
     # recording 은 켠다 — data/kis_data.db 에 원본 틱·이벤트가 쌓인다.
-    kis.run(recording=True, trading=False, show=False)   # 블로킹
+    kis.run(recording=True, trading=False, show=False)   # 블로킹 — q → kis.stop() 이 풀어준다
+
+    # 웹소켓이 끝났다(q 종료 또는 오류) — trading_q/지표를 마저 비우고 저장한다.
+    runner.stop()
+    trader.stop_recording()
 
 
 def run_sim():
+    simul_mode = True
     log.info("run_sim 시작")
-    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=True)
+    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=simul_mode)
+    build_recording(kis, simul_mode=simul_mode)
     trader = build_trader()
 
-    kis.run(recording=True, trading=False, show=False)   # 블로킹
-    trader.run_sim(kis.market_event_queue)
+    runner = trader.run_sim(kis.market_event_queue, on_quit=kis.stop)
+    kis.run(recording=True, trading=False, show=False)   # 블로킹 — q → kis.stop() 이 풀어준다
+
+    runner.stop()
+    trader.stop_recording()
 
 
 # ═══════════════════════════════════════════════════════════════════

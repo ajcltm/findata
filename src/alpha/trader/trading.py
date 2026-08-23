@@ -1063,7 +1063,7 @@ class Trader:
     def __init__(self, broker: Broker, strategy: Strategy,
                  warmup: int = 0, dry_run: bool = True,
                  state_path: str | None = None,
-                 strategy_id: str = "", recorder=None):
+                 strategy_id: str = "", recorder=None, view_q=None):
         self.raw_broker = broker            # 어댑터가 내부 상태에 접근할 때 씀
         # 전략에게는 감싼 것을 준다. 킬스위치가 우회되지 않도록.
         self.broker = GuardBroker(broker, enabled=False, dry_run=dry_run)
@@ -1073,9 +1073,12 @@ class Trader:
         strategy.trader = self
 
         self.strategy_id = strategy_id
-        # IndicatorSnapshot 저장용. None 이면 기록하지 않는다(백테스트에서
-        # 매번 새 recorder 를 만들 필요가 없도록 옵션으로 둔다).
+        # IndicatorSnapshot 저장/화면표시용. 둘 다 None 이면 아무 일도 안 한다
+        # (백테스트에서 매번 새로 만들 필요가 없도록 옵션으로 둔다).
+        # Engine 이 자기 recorder/view_q 를 그대로 물려준다 — 다른 파생
+        # 데이터(Bar)와 같은 두 큐를 공유해야 뷰·저장이 한 경로로 모인다.
         self.recorder = recorder
+        self.view_q = view_q
 
         self.tracker = TradeTracker()
         self.warmup = warmup                # 이 봉 수까지는 on_bar 를 안 부른다
@@ -1244,18 +1247,27 @@ class Trader:
 
     # ───────── 내부 ─────────
     def _record_indicators(self, ev: MarketEvent):
-        """지금 지표 값을 IndicatorSnapshot(long 포맷)으로 recorder 에 남긴다.
+        """지금 지표 값을 IndicatorSnapshot(long 포맷)으로 recorder 에 남기고
+        view_q 에도 흘려 콘솔 뷰(Pivot 등 구독 화면)에서 바로 보이게 한다.
+
+        지표는 Engine.feed() 가 아니라 여기(Trader) 안에서만 만들어지는
+        데이터라, Engine 이 자기 view_q/recorder 를 물려준 것을 그대로 쓴다
+        — 그래야 Bar/외부이벤트(Engine.feed() 담당)와 같은 두 큐로 합쳐진다.
 
         ev.dt 를 쓰는 이유: 기록 시각이 아니라 '그 봉 시각'이어야 재생·조인이
-        맞는다. recorder=None 이면(기록을 안 켰거나 백테스트에서 끈 경우)
-        아무 일도 하지 않는다."""
-        if self.recorder is None:
+        맞는다. 둘 다 None 이면(기록·뷰를 안 켰거나 백테스트) 아무 일도
+        하지 않는다."""
+        if self.recorder is None and self.view_q is None:
             return
         for label, value in self.strategy.indicator_snapshot().items():
-            self.recorder.put(IndicatorSnapshot(
+            snap = IndicatorSnapshot(
                 dt=ev.dt, strategy_id=self.strategy_id, symbol=ev.symbol,
                 label=label, line="", value=value, trigger="bar",
-            ))
+            )
+            if self.recorder is not None:
+                self.recorder.put(snap)
+            if self.view_q is not None:
+                self.view_q.put(snap)
 
     def _safe(self, fn, *args):
         """전략이 터져도 엔진은 살아있어야 한다.

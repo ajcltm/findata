@@ -21,17 +21,16 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
-
-from kis import kis_config
+from typing import Callable, Optional
 
 from alpha.engine.engine import Engine
 from alpha.engine.live_runner import LiveRunner
 from alpha.broker.kis_broker import KISBroker
 from alpha.broker.sim_broker import SimBroker
-from alpha.trader.trading import Strategy, IndicatorSnapshot
+from alpha.trader.trading import Strategy
 from alpha.recording.recorder import Recorder
-from alpha.recording.sinks import SqliteSink
+from alpha.view.app import Application
+from alpha.view.model import Aggregator
 
 log = logging.getLogger("main")
 
@@ -69,14 +68,14 @@ class AlphaTrader:
     def __init__(self, state_dir: Optional[str] = None):
         self.state_dir = state_dir
         self._specs: list[dict] = []
+        self._view_specs: list[dict] = []
 
-        # 등록된 전략들의 지표 값(IndicatorSnapshot)을 저장한다.
-        # data/kis_data.db(시세 원본)와 별개 파일 — 지표는 전략에 딸린
-        # 파생 데이터라 소스(KiSEngine)와 소비자(AlphaTrader)를 나눠 둔다.
+        # 지표 값(IndicatorSnapshot) 등, 전략이 만들어내는 파생 데이터를
+        # 저장할 레코더. 무엇을 어디에 저장할지는 여기서 정하지 않는다 —
+        # add_recording() 으로 메인 파일이 build_trader() 자리에서 등록한다.
+        # data/kis_data.db(시세 원본)와 별개인 이유는 지표가 전략에 딸린
+        # 파생 데이터라 소스(KiSEngine)와 소비자(AlphaTrader)를 나눠서다.
         self._recorder = Recorder()
-        self._recorder.subscribe(IndicatorSnapshot,
-                                 SqliteSink(str(kis_config.DATA_DIR / "alpha_data.db")),
-                                 name="indicator")
 
     # ── 전략 등록 ────────────────────────────────────────────────
     def add_strategy(self, strategy_id: str, strategy: Strategy,
@@ -96,13 +95,48 @@ class AlphaTrader:
                 list(ticks), list(quotes), list(bars))
         return self
 
-    def _build_engine(self, broker, dry_run: bool) -> Engine:
+    # ── 레코더 구독 등록 ─────────────────────────────────────────
+    def add_recording(self, dtype: type, sink, name: Optional[str] = None,
+                       **kwargs) -> "AlphaTrader":
+        """이 트레이더가 만드는 데이터(IndicatorSnapshot 등)를 무엇을
+        어디에 저장할지 등록한다. add_strategy() 처럼 build_trader() 자리에서
+        부르면 된다 — 등록만 쌓아두고, 실제 구독은 즉시 적용된다
+        (Recorder.subscribe 는 스레드 기동과 무관하다).
+
+        kwargs 는 Recorder.subscribe() 로 그대로 전달된다(batch, max_age, extra)."""
+        self._recorder.subscribe(dtype, sink, name=name, **kwargs)
+        log.info("레코더 구독 등록: %s → %s", dtype.__name__, name or dtype.__name__.lower())
+        return self
+
+    # ── 콘솔 뷰 구독 등록 ────────────────────────────────────────
+    def add_view(self, dtype: type, agg: Aggregator, name: Optional[str] = None,
+                 where=None) -> "AlphaTrader":
+        """콘솔 뷰(구독 화면)에 패널 하나를 등록한다. 등록 순서가 곧
+        숫자키(1,2,3...)다 — add_strategy() 와 나란히 build_trader() 자리에서
+        부르면 된다. 실제 app.subscribe() 호출은 run_live/run_sim 이
+        Application 을 만드는 시점에 이 목록을 그대로 재생한다."""
+        self._view_specs.append(dict(dtype=dtype, agg=agg, name=name, where=where))
+        log.info("뷰 구독 등록: %s (%s)", name or dtype.__name__, type(agg).__name__)
+        return self
+
+    def _apply_view(self, app: Application) -> Application:
+        for spec in self._view_specs:
+            app.subscribe(spec["dtype"], spec["agg"], name=spec["name"], where=spec["where"])
+        return app
+
+    def _build_engine(self, broker, dry_run: bool, view_q=None) -> Engine:
         """실전/모의/백테스트가 공유하는 조립 지점.
         bt_broker.run_backtest 가 요구하는 build_engine(broker, dry_run) 시그니처와
-        맞춰뒀다 — 백테스트 경로도 이 메서드를 그대로 넘겨 쓴다."""
+        맞춰뒀다 — 백테스트 경로도 이 메서드를 그대로 넘겨 쓴다(view_q 는
+        기본값 None 이라 위치 인자 두 개짜리 호출과 그대로 호환된다).
+
+        view_q 를 여기서 Engine 에 심는 이유: Engine.feed()/feed_timer() 가
+        만드는 봉과 흘러들어오는 외부 이벤트를 콘솔 뷰로 보내는 유일한
+        통로가 Engine 이어야, LiveRunner 가 따로 view_q 에 넣던 것과 겹쳐
+        화면에 같은 이벤트가 두 번 뜨는 일이 없다."""
         self._recorder.start()   # 이미 떠 있으면 no-op
         eng = Engine(real_broker=broker, dry_run=dry_run, state_dir=self.state_dir,
-                    recorder=self._recorder)
+                    recorder=self._recorder, view_q=view_q)
         for spec in self._specs:
             eng.add(spec["strategy_id"], spec["strategy"],
                      allocation=spec["allocation"], ticks=spec["ticks"],
@@ -113,35 +147,53 @@ class AlphaTrader:
     # ── 실행 경로 ────────────────────────────────────────────────
     def run_live(self, market_event_queue, dry_run: bool = True,
                  business_date: Optional[date] = None,
-                 kill_file: str = "./STOP_TRADING") -> LiveRunner:
+                 kill_file: str = "./STOP_TRADING",
+                 on_quit: Optional[Callable[[], None]] = None) -> LiveRunner:
         """실계좌. market_event_queue 는 KiSEngine.market_event_queue —
-        웹소켓 수신·파싱·정규화가 이미 끝난 MarketEvent/Notice 스트림이다."""
+        웹소켓 수신·파싱·정규화가 이미 끝난 MarketEvent/Notice 스트림이다.
+
+        on_quit : 콘솔에서 'q'를 누르면 불린다. 데이터 소스(KiSEngine.stop)를
+                  세우는 것까지만 책임진다 — 그래야 kis.run()의 블로킹이
+                  풀리고, 다운스트림 드레인·flush는 호출자(메인 파일)가
+                  kis.run() 리턴 뒤에 이어서 한다."""
         log.info("AlphaTrader.run_live 시작 — 전략 %d개, dry_run=%s", len(self._specs), dry_run)
         broker = KISBroker()
-        eng = self._build_engine(broker, dry_run)
-        runner = LiveRunner(engine=eng, trading_q=market_event_queue, broker=broker,
+
+        # Application(view_q)을 Engine보다 먼저 만든다 — Engine.feed()가
+        # 만드는 봉/외부이벤트를 view_q로 바로 흘리려면 Engine 생성 시점에
+        # 그 큐가 이미 있어야 한다.
+        app = self._apply_view(Application(on_quit=on_quit))
+        eng = self._build_engine(broker, dry_run, view_q=app.view_q)
+
+        runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=False, dry_run=dry_run,
                             business_date=business_date, kill_file=kill_file)
         runner.start()
+        app.run()
         log.info("AlphaTrader.run_live — LiveRunner 기동 완료")
         return runner
 
     def run_sim(self, market_event_queue, cash: float = 10_000_000,
                 business_date: Optional[date] = None,
                 kill_file: str = "./STOP_TRADING",
+                on_quit: Optional[Callable[[], None]] = None,
                 **sim_broker_kwargs) -> LiveRunner:
         """모의투자. 실시간 market_event_queue 로 시세를 받되 주문은 가짜다.
 
         ★ SimBroker 가 같은 큐에 체결통보를 되돌려 넣는다 ★
           fill_q=market_event_queue 로 넘기면 시세와 모의체결이 한 큐에서
-          순서대로 나온다 — LiveRunner 가 실전과 똑같은 소비 루프로 처리한다."""
+          순서대로 나온다 — LiveRunner 가 실전과 똑같은 소비 루프로 처리한다.
+
+        on_quit : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다."""
         log.info("AlphaTrader.run_sim 시작 — 전략 %d개, cash=%s", len(self._specs), cash)
         broker = SimBroker(fill_q=market_event_queue, cash=cash, **sim_broker_kwargs)
-        eng = self._build_engine(broker, dry_run=False)   # 모의는 항상 가짜주문을 낸다
-        runner = LiveRunner(engine=eng, trading_q=market_event_queue, broker=broker,
+        app = self._apply_view(Application(on_quit=on_quit))
+        eng = self._build_engine(broker, dry_run=False, view_q=app.view_q)   # 모의는 항상 가짜주문을 낸다
+        runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=True, dry_run=False,
                             business_date=business_date, kill_file=kill_file)
         runner.start()
+        app.run()
         log.info("AlphaTrader.run_sim — LiveRunner 기동 완료")
         return runner
 

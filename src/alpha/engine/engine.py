@@ -163,7 +163,7 @@ class Engine:
     """
 
     def __init__(self, real_broker: Broker, dry_run: bool = True,
-                 state_dir: str | None = None, recorder=None):
+                 state_dir: str | None = None, recorder=None, view_q=None):
         self.portfolio = PortfolioBroker(real_broker)
         self.router = EventRouter()
         self.bars = BarFactory()
@@ -173,6 +173,11 @@ class Engine:
         # 전략별 Trader 에 그대로 물려준다. IndicatorSnapshot 저장용
         # (Recorder|None) — None 이면 지표를 기록하지 않는다.
         self.recorder = recorder
+        # 콘솔 뷰가 읽는 큐(Application.view_q). feed()/feed_timer() 가 만드는
+        # 봉과, 여기로 들어오는 외부 이벤트(Tick/Quote)를 전부 여기로 흘린다
+        # — '엔진을 거치는 것'의 저장·뷰가 이 한 곳(Engine)에서 일원화된다.
+        # None 이면(백테스트 등) 아무 데도 안 흘린다.
+        self.view_q = view_q
 
     # ───────── 등록 ─────────
     def add(self, strategy_id: str, strategy: Strategy,
@@ -210,7 +215,8 @@ class Engine:
                         dry_run=self.dry_run,
                         state_path=(f"{self.state_dir}/{strategy_id}.json"
                                     if self.state_dir else None),
-                        strategy_id=strategy_id, recorder=self.recorder)
+                        strategy_id=strategy_id, recorder=self.recorder,
+                        view_q=self.view_q)
 
         subs = [Subscription(s, "tick") for s in ticks]
         subs += [Subscription(s, "quote") for s in quotes]
@@ -309,26 +315,40 @@ class Engine:
         """시장 이벤트 하나. 이 엔진의 주 진입점이다.
 
         ★ 순서 ★
-          ① 브로커가 먼저 본다 — 시계·현재가 갱신
-             전략이 target_pct 를 부를 때 이미 기준가가 있어야 한다.
-          ② 그 다음 전략에 배달한다.
+          ① view_q 로 흘린다 — 밖에서 들어온 이벤트든, 아래서 재귀로 들어오는
+             봉이든 전부 여기를 한 번은 지난다. 콘솔 뷰가 보는 창구를 이
+             메서드 하나로 모아, LiveRunner가 따로 view_q에 넣지 않게 한다.
+          ② 브로커가 본다 — 시계·현재가 갱신. 전략이 target_pct 를 부를 때
+             이미 기준가가 있어야 한다.
+          ③ 전략에 배달한다.
 
         틱이면 봉 집계도 함께 돌린다:
             틱 도착 → 틱 구독자에게 배달
-                   → 봉이 닫혔으면 그 봉도 같은 경로로 배달
+                   → 봉이 닫혔으면 recorder 에 남기고(Bar는 여기서만 만들어져
+                     kis.recorder 같은 원본 저장소가 없다) 같은 경로로 배달
         """
-        self.portfolio.real.on_market(ev)    # ① 브로커 (구현 안 했으면 no-op)
-        self.router.dispatch(ev)             # ② 전략
+        if self.view_q is not None:
+            self.view_q.put(ev)               # ①
+
+        self.portfolio.real.on_market(ev)    # ② 브로커 (구현 안 했으면 no-op)
+        self.router.dispatch(ev)             # ③ 전략
 
         if ev.kind == "tick":
             for bar in self.bars.on_tick(ev):
-                self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다
+                if self.recorder is not None:
+                    self.recorder.put(bar)
+                self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다. view_q도 여기서 같이 탄다
 
     def feed_timer(self, now: datetime):
         """주기 호출(1초 등). 두 가지를 한다.
-            ① 틱이 끊긴 봉 강제 마감
+            ① 틱이 끊긴 봉 강제 마감 — feed()를 거치지 않으므로 recorder/view_q를
+               직접 챙긴다(브로커의 on_market은 원래도 이 경로에서 안 불렀다)
             ② 전략의 on_timer — 종가청산, 미체결 정정 등 시각 기반 로직"""
         for bar in self.bars.flush(now):
+            if self.recorder is not None:
+                self.recorder.put(bar)
+            if self.view_q is not None:
+                self.view_q.put(bar)
             self.router.dispatch(bar)
         for slot in self.slots.values():
             slot.trader.feed_timer(now)
