@@ -32,8 +32,12 @@
         낙관적으로 보고 싶으면 fill_policy="touch" 로 바꿀 수 있다.
 
 ■ 체결 경로가 실전과 같다
-    실계좌:  거래소 체결 → 소켓 → trading_q → Notice → on_execution_report
-    모의:    _match 판정 → trading_q → SimNotice → on_execution_report
+    실계좌:  거래소 체결 → 소켓 → trading_q → events.Notice → on_execution_report
+    모의:    _match 판정 → trading_q → events.Notice → on_execution_report
+
+    둘 다 같은 events.Notice(정규화된 MarketEvent)를 큐에 넣는다 —
+    필드 이름이 다른 원본(SimNotice)을 따로 만들지 않으므로 LiveRunner가
+    실전/모의를 구분할 필요가 없다.
 
     _match 는 '체결됐다'는 통보만 큐에 넣는다. 포지션·현금 갱신은
     on_execution_report 가 한다 — 실브로커와 완전히 같은 자리다.
@@ -48,11 +52,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from alpha.events.events import MarketEvent
+from alpha.events.events import MarketEvent, Notice
 from alpha.trader.trading import (EPS, Broker, Fill, Order, OrderStatus, OrderType,
                      Position, Side)
 
@@ -68,19 +71,6 @@ def round_to_tick(price: float) -> float:
         if p < limit:
             return round(p / tick) * tick
     return round(p / 1000) * 1000
-
-
-@dataclass(slots=True)
-class SimNotice:
-    """모의 체결통보. KIS 의 Notice(H0STCNI0)와 같은 자리다.
-
-    EngineTrader._is_notice 가 order_no / executed_qty 로 판별하므로
-    필드 이름을 맞추면 실전과 같은 경로를 탄다."""
-    order_no: str
-    executed_qty: str
-    executed_price: str
-    stock_code: str = ""
-    is_rejected: str = "N"
 
 
 class SimBroker(Broker):
@@ -234,9 +224,13 @@ class SimBroker(Broker):
                 continue
 
             self._sent.add(order.id)
-            notice = SimNotice(order_no=order.id, stock_code=order.symbol,
-                               executed_qty=str(int(order.remaining)),
-                               executed_price=str(px))
+            # 실전(events.from_notice)과 같은 정규화 타입을 직접 만든다.
+            # SimBroker는 자기 시계(self._now)를 이미 갖고 있으므로,
+            # KiSEngine처럼 별도 정규화 함수를 거칠 필요 없이 여기서
+            # 바로 events.Notice를 완성한다.
+            notice = Notice(kind="notice", symbol=order.symbol, dt=self._now,
+                            order_no=order.id, rejected=False,
+                            filled_qty=order.remaining, price=px)
             try:
                 self.fill_q.put_nowait(notice)
             except Exception:

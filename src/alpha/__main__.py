@@ -44,12 +44,32 @@ from alpha.events import events
 from alpha.recording.sinks import SqliteSink
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
-from alpha.trader.trading import IndicatorSnapshot
+from alpha.trader.trading import IndicatorSnapshot, Fill, Trade
 from alpha.view import model
 
 log = logging.getLogger("main")
 
-SYMBOL = "005930"
+SYMBOL = [
+        "005930",  # 삼성전자
+        "000660",  # SK하이닉스
+        "035420",  # NAVER
+        "035720",  # 카카오
+        "005380",  # 현대차
+        "000270",  # 기아
+        "012330",  # 현대모비스
+        "068270",  # 셀트리온
+        "105560",  # KB금융
+        "055550",  # 신한지주
+        "086790",  # 하나금융지주
+        "316140",  # 우리금융지주
+        "005490",  # POSCO홀딩스
+        "051910",  # LG화학
+        "006400",  # 삼성SDI
+        "003550",  # LG
+        "066570",  # LG전자
+        "034730",  # SK
+    ]
+
 BAR_SECONDS = 60
 
 
@@ -93,28 +113,54 @@ def setup_logging(mode: str, verbose: bool) -> Path:
 # 1. 전략 + 레코더 + 뷰 등록 — 세 실행 경로의 유일한 공통 정의
 # ═══════════════════════════════════════════════════════════════════
 
-def build_trader() -> AlphaTrader:
+def build_trader(simul_mode: bool) -> AlphaTrader:
     trader = AlphaTrader()
-    trader.add_strategy("추세", SmaCrossATR(symbol=SYMBOL),
+
+    trader.add_strategy("추세", SmaCrossATR(symbol=SYMBOL[0]),
                         allocation=5_000_000,
-                        bars=[(SYMBOL, BAR_SECONDS)],
+                        bars=[(symbol, BAR_SECONDS) for symbol in SYMBOL],
                         warmup=20)                  # 지표가 데워질 때까지 주문 차단
     trader.add_strategy("호가감시", SpreadWatcher(),
                         allocation=0,                # 주문 안 내므로 0
-                        quotes=[SYMBOL])
+                        quotes=SYMBOL)
 
-    # ── 레코더 구독 — AlphaTrader(Engine)가 만들어내는 파생 데이터를 어디에
-    #    저장할지. 원본 Tick/Quote/Notice는 build_recording(kis)가 이미
-    #    kis_data.db에 저장하므로 여기서 또 저장하지 않는다(중복 방지) —
+    # ── 레코더 구독 — AlphaTrader(Engine)가 다루는 데이터를 어디에 저장할지.
     #    Bar/IndicatorSnapshot은 Engine.feed()/Trader 안에서만 만들어지는
-    #    데이터라 여기가 유일한 저장 지점이다.
-    alpha_sink = SqliteSink(str(kis_config.DATA_DIR / "alpha_data.db"))
+    #    데이터라 여기가 유일한 저장 지점이다. Tick/Quote는 build_recording(kis)가
+    #    kis_data.db에 원본(파싱 직후)을 이미 저장하지만, 여기서도 한 번 더
+    #    alpha_data.db에 남긴다 — Engine.feed()를 통과한(=전략에 실제로
+    #    배달된) 이벤트라서 kis_data.db 쪽과 타이밍/필터링이 다를 수 있다.
+    db_name = "alpha_data_sim.db" if simul_mode else "alpha_data.db"
+    alpha_sink = SqliteSink(str(kis_config.DATA_DIR / db_name))
+
+    trader.add_recording(Fill, alpha_sink, name="fill")
+
+    # Trade(라운드트립 완결)는 strategy_id 를 자기 필드로 갖는다
+    # (Trader.feed_fill() 이 채워 넣는다) — extra 로 주지 않는다. extra 는
+    # 구독 채널 하나에 고정되는 값이라, 거래를 내는 전략이 둘 이상이면
+    # 같은 Recorder 에 Trade 를 또 구독해 extra 만 다르게 줘도 안 나뉜다
+    # (Recorder 가 같은 타입의 모든 구독 채널에 레코드를 전부 복사해
+    # 뿌리기 때문에, 그러면 서로 다른 전략의 거래가 양쪽 테이블에 겹쳐
+    # 들어가고 strategy_id 도 뒤섞인다). 필드로 두면 전략이 몇 개든 안전하다.
+    trader.add_recording(Trade, alpha_sink, name="trade")
+
     trader.add_recording(IndicatorSnapshot, alpha_sink, name="indicator")
     trader.add_recording(events.Bar, alpha_sink, name="bar")
     trader.add_recording(events.Tick, alpha_sink, name="tick")
     trader.add_recording(events.Quote, alpha_sink, name="quote")
+    # events.Notice — 실전(KiSEngine)/모의(SimBroker) 체결통보가 이제
+    # 하나의 정규화된 타입이라 여기 한 번만 등록하면 둘 다 잡힌다.
+    trader.add_recording(events.Notice, alpha_sink, name="notice")
 
     # ── 콘솔 뷰 구독 — 등록 순서가 곧 'v' 화면의 숫자키(1,2,3...) ──
+    trader.add_view(Fill, model.Recent(100000, cols=[
+        "dt", "symbol", "side", "size", "price", "order_id", "commission"]), name="체결(fill)")
+    trader.add_view(Trade, model.Recent(100000, cols=[
+        "strategy_id", "symbol", "size", "entry_dt", "entry_price",
+        "exit_dt", "exit_price", "gross_pnl", "commission"]), name="거래(trade)")
+    trader.add_view(events.Notice, model.Recent(100000, cols=[
+        "dt", "symbol", "order_no", "filled_qty", "price", "rejected"]),
+        name="체결통보")
     trader.add_view(events.Tick, model.Board(cols=["price", "volume"]),
                     name="시세판")
     trader.add_view(events.Quote, model.Latest(), name="호가")
@@ -144,9 +190,9 @@ def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
 def run_live(dry_run: bool):
     simul_mode = False
     log.info("run_live 시작 (dry_run=%s)", dry_run)
-    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=simul_mode)
+    kis = KiSEngine(price_codes=SYMBOL, orderbook_codes=SYMBOL, simul_mode=simul_mode)
     build_recording(kis, simul_mode=simul_mode)
-    trader = build_trader()
+    trader = build_trader(simul_mode=simul_mode)
 
     # on_quit=kis.stop : 콘솔에서 'q'를 누르면 웹소켓만 세운다.
     # 그래야 아래 kis.run()의 블로킹이 풀리고, 다운스트림 드레인·flush는
@@ -165,12 +211,12 @@ def run_live(dry_run: bool):
     trader.stop_recording()
 
 
-def run_sim():
-    simul_mode = True
+def run_sim(simul):
+    simul_mode = simul
     log.info("run_sim 시작")
-    kis = KiSEngine(price_codes=[SYMBOL], orderbook_codes=[SYMBOL], simul_mode=simul_mode)
+    kis = KiSEngine(price_codes=SYMBOL, orderbook_codes=SYMBOL, simul_mode=simul_mode)
     build_recording(kis, simul_mode=simul_mode)
-    trader = build_trader()
+    trader = build_trader(simul_mode=simul_mode)
 
     runner = trader.run_sim(kis.market_event_queue, on_quit=kis.stop)
     kis.run(recording=True, trading=False, show=False)   # 블로킹 — q → kis.stop() 이 풀어준다
@@ -244,6 +290,7 @@ def main():
     ap.add_argument("--plot", action="store_true", help="백테스트 차트 표시")
     ap.add_argument("--real", action="store_true",
                     help="live 모드에서 실주문 활성화 (기본은 dry-run)")
+    ap.add_argument("--simul", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -252,7 +299,7 @@ def main():
     if args.mode == "live":
         run_live(dry_run=not args.real)
     elif args.mode == "sim":
-        run_sim()
+        run_sim(simul=args.simul)
     else:
         run_backtest(args.csv, args.plot)
 

@@ -243,7 +243,7 @@ class Recorder:
         chans = self.channels.get(type(rec))
         if not chans:
             # 구독하지 않은 타입. 버리되 조용히 버리지는 않는다.
-            log.warning("구독되지 않은 타입: %s", type(rec).__name__)
+            log.warning("구독되지 않은 타입: %s : %s", type(rec).__name__, repr(rec))
             return
         for ch in chans:
             if ch.disabled:

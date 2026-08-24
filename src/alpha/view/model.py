@@ -186,7 +186,7 @@ def to_row(obj) -> dict:
     return {name: getattr(obj, name, None) for name in field_names}
 
 
-def cell(value, max_len: int = 14) -> str:
+def cell(value, max_len: int = 100) -> str:
     """값 하나를 화면에 쓸 문자열로 바꾼다.
 
     예)

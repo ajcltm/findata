@@ -43,7 +43,7 @@ from kis.kis_websocket import SENTINEL
 
 from alpha.engine.engine import Engine
 from alpha.trader.killswitch import KillSwitch
-from alpha.events.events import MarketEvent, parse_hhmmss
+from alpha.events.events import MarketEvent, Notice
 from alpha.trader.trading import Fill, Order
 
 log = logging.getLogger("alpha.live_runner")
@@ -124,11 +124,13 @@ class LiveRunner:
         while True:
             try:
                 raw = self.trading_q.get(timeout=0.2)
-                # MarketEvent(Tick/Quote)와 거기서 파생되는 Bar는 이제
-                # engine.feed() 가 직접 view_q 로 흘린다 — 여기서 또 넣으면
-                # 화면에 같은 이벤트가 두 번 뜬다. 체결통보처럼 engine.feed()
-                # 를 거치지 않는 것들만(SENTINEL 포함) 여기서 예외로 넣는다.
-                if not isinstance(raw, MarketEvent):
+                # Tick/Quote와 거기서 파생되는 Bar는 engine.feed() 가 직접
+                # view_q 로 흘린다 — 여기서 또 넣으면 화면에 같은 이벤트가
+                # 두 번 뜬다. Notice는 MarketEvent이긴 하지만 engine.feed()
+                # 를 거치지 않고 _handle_notice→feed_execution()으로 가므로
+                # (체결통보는 심볼 방송이 아니라 주문 소유자에게만 가야 해서
+                # 라우팅 방식 자체가 다르다) SENTINEL과 함께 여기서 예외로 넣는다.
+                if not isinstance(raw, MarketEvent) or self._is_notice(raw):
                     self.view_q.put(raw)
                 if raw:
                     consumed += 1
@@ -176,14 +178,14 @@ class LiveRunner:
     # ═══════════════════════════════════════════════════════
     def _consume(self, ev):
         """trading_q 에는 이제 KiSEngine.market_event_queue 가 이미 파싱하고
-        MarketEvent(Tick/Quote)로 정규화해 넣는다. 여기서는 더 이상 원본을
-        파싱하지 않고 그대로 Engine 에 먹인다.
+        MarketEvent(Tick/Quote/Notice)로 정규화해 넣는다. 여기서는 더 이상
+        원본을 파싱하지 않고 그대로 Engine 에 먹인다.
 
         ■ 체결통보(Notice)는 예외다
-            KiSEngine.market_event_queue 는 가격/호가만 MarketEvent 로 변환하고
-            체결통보는 흘리지 않는다. SimBroker 가 trading_q 에 직접 넣는
-            체결통보 객체만 여기서 받는다 — 실전 체결통보 경로가 필요해지면
-            KiSEngine 쪽에 별도 큐를 추가해야 한다.
+            같은 MarketEvent 지만 engine.feed() 의 심볼 기준 브로드캐스트가
+            아니라 '이 주문을 낸 전략에게만' 가야 하므로, engine.feed_execution
+            을 통해 주문 소유자로 라우팅한다(KiSEngine.실전/SimBroker.모의
+            둘 다 events.Notice 로 정규화해서 넣으므로 필드 이름을 몰라도 된다).
 
         ■ SENTINEL(kis_websocket)도 여기로 들어온다
             KiSEngine이 웹소켓 종료 시 trading_q(=market_event_queue) 끝에
@@ -204,45 +206,33 @@ class LiveRunner:
             log.warning("알 수 없는 trading_q 항목 무시: %r", ev)
 
     def _is_notice(self, obj) -> bool:
-        """체결통보인가. 주문번호와 체결수량을 갖는지로 판별한다.
+        """체결통보인가. KiSEngine(실전)과 SimBroker(모의) 가 각각
+        events.from_notice() / 직접 생성으로 이미 events.Notice 하나로
+        정규화해서 넣으므로, 더 이상 필드 이름(order_no/ODER_NO 등)으로
+        판별할 필요가 없다."""
+        return isinstance(obj, Notice)
 
-        KIS 의 Notice(H0STCNI0, KIS 원문 그대로 대문자 필드)와 SimBroker 의
-        SimNotice(소문자 필드)가 둘 다 통과한다 — 필드로 판별하므로 클래스를
-        알 필요가 없다."""
-        return ((hasattr(obj, "order_no") and hasattr(obj, "executed_qty"))
-                or (hasattr(obj, "ODER_NO") and hasattr(obj, "CNTG_QTY")))
+    def _handle_notice(self, n: Notice):
+        """체결통보를 Engine 에 넘긴다.
 
-    def _handle_notice(self, n):
-        """체결통보 전문을 파싱해 Engine 에 넘긴다.
-
-        이 메서드의 책임은 '체결통보 → 표준 인자' 변환뿐이다.
+        이 메서드의 책임은 'Notice → 표준 인자' 변환뿐이다.
         브로커 갱신과 전략 라우팅은 Engine.feed_execution 이 한다.
         (호출자가 브로커를 직접 만지면 백테스트 경로와 어긋난다)
 
-        ★ 모의와 실전이 같은 경로다, 필드 이름만 다르다 ★
-          실계좌: 거래소 → 소켓 → trading_q → Notice(KIS 원문, 대문자 필드)
-          모의:   SimBroker._match → trading_q → SimNotice(소문자 필드)"""
-        if hasattr(n, "order_no"):
-            order_no = n.order_no
-            rejected = getattr(n, "is_rejected", "N") == "Y"
-            filled_qty = float(getattr(n, "executed_qty", 0) or 0)
-            price = float(getattr(n, "executed_price", 0) or 0)
-            dt = self.broker.now
-        else:
-            order_no = n.ODER_NO
-            rejected = n.RFUS_YN == "Y"
-            filled_qty = float(n.CNTG_QTY or 0)
-            price = float(n.CNTG_UNPR or 0)
-            dt = parse_hhmmss(n.STCK_CNTG_HOUR, on=self.on_date)
+        recorder 는 여기서 직접 챙긴다 — engine.feed() 를 거치지 않아서
+        Engine.feed() 의 자동 recorder/view_q 전달을 못 받기 때문이다
+        (view_q 는 roop() 이 이미 넣었다)."""
+        if self.engine.recorder is not None:
+            self.engine.recorder.put(n)
 
-        log.info("체결통보 처리: 주문 %s %s %s주 @%s", order_no,
-                "거부" if rejected else "체결", filled_qty, price)
+        log.info("체결통보 처리: 주문 %s %s %s주 @%s", n.order_no,
+                "거부" if n.rejected else "체결", n.filled_qty, n.price)
         self.engine.feed_execution(
-            broker_id=order_no,
-            status=("reject" if rejected else "fill"),
-            filled_qty=filled_qty,
-            price=price,
-            dt=dt,
+            broker_id=n.order_no,
+            status=("reject" if n.rejected else "fill"),
+            filled_qty=n.filled_qty,
+            price=n.price,
+            dt=n.dt,
         )
 
     # ═══════════════════════════════════════════════════════

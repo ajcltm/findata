@@ -241,6 +241,25 @@ class Bar(MarketEvent):
     def high_price(self): return self.high
 
 
+@dataclass(frozen=True)
+class Notice(MarketEvent):
+    """체결통보 하나(주문 접수/체결/거부 결과). H0STCNI0 또는 SimBroker의
+    모의 체결에서 정규화.
+
+    ■ 왜 필요한가
+        실전(H0STCNI0, 대문자 필드)과 모의(SimBroker, 소문자 필드)가
+        같은 정보를 필드 이름만 다르게 실어 보낸다. 하류(LiveRunner)가
+        둘을 매번 hasattr 로 구분하는 대신, 소스 쪽(KiSEngine.
+        _to_market_event / SimBroker._match)에서 여기로 한 번만
+        정규화해두면 그 뒤로는 Tick/Quote 와 똑같이 다뤄진다 —
+        구독(레코더·뷰)도 되고, 실전/모의 분기도 사라진다.
+    """
+    order_no: str = ""
+    rejected: bool = False
+    filled_qty: float = 0.0
+    price: float = 0.0
+
+
 # ═══════════════════════════════════════════════════════════════════
 # 2. 정규화 — 원본 dataclass → 이벤트
 # ═══════════════════════════════════════════════════════════════════
@@ -341,6 +360,25 @@ def from_orderbook(b, depth: int = 10, on: Optional[date] = None) -> Quote:
         bid_sizes=series("bid_rsvp_"),
         total_ask_size=_f(b.total_ask_rsvp),
         total_bid_size=_f(b.total_bid_rsvp),
+    )
+
+
+def from_notice(n, on: Optional[date] = None) -> Notice:
+    """Notice(H0STCNI0, KIS 원문 대문자 필드) → Notice(정규화).
+
+    ■ 모의(SimBroker)는 여기를 거치지 않는다
+        SimBroker 는 자기 시계(self._now)를 이미 갖고 있어서, 체결
+        판정 시점에 곧바로 Notice(정규화)를 만들어 큐에 넣는다 —
+        이 함수는 실전 웹소켓 원문(대문자 필드)만 정규화한다."""
+    return Notice(
+        kind="notice",
+        symbol=n.STCK_SHRN_ISCD,
+        dt=parse_hhmmss(n.STCK_CNTG_HOUR, on),
+        raw=n,
+        order_no=n.ODER_NO,
+        rejected=(n.RFUS_YN == "Y"),
+        filled_qty=_f(n.CNTG_QTY),
+        price=_f(n.CNTG_UNPR),
     )
 
 

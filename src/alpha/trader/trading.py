@@ -230,6 +230,15 @@ class Trade:
     exit_fills: int = 0         # 몇 번에 나눠 팔았나
     fills: list = field(default_factory=list)   # 이 거래를 구성한 체결 전부
 
+    # ★ 기록/조회용 — TradeTracker/이 dataclass는 자기가 어느 전략 것인지
+    #   모른다(심볼·체결만 본다). Trader.feed_fill() 이 tracker.on_fill() 이
+    #   돌려준 직후 채워 넣는다. Recorder.subscribe(..., extra=...)로 채우지
+    #   않는 이유: extra는 구독 채널 하나에 고정되는 값이라, 거래를 내는
+    #   전략이 둘 이상이면 같은 Recorder에 Trade를 구독하는 모든 채널에
+    #   레코드가 전부 복사돼 strategy_id가 뒤섞인다(IndicatorSnapshot의
+    #   strategy_id 필드와 같은 이유로 여기도 필드로 둔다).
+    strategy_id: str = ""
+
     @property
     def is_closed(self) -> bool:
         return self.exit_dt is not None
@@ -1238,7 +1247,19 @@ class Trader:
         self.broker.apply_fill(fill)                # ①
         trade = self.tracker.on_fill(fill)          # ②
         if trade is not None:
+            trade.strategy_id = self.strategy_id    # TradeTracker는 이걸 모른다
             self._safe(self.strategy.on_trade, trade)
+            # 라운드트립 완결 — recorder/view_q 에도 흘린다. TradeTracker
+            # 안(완전청산 분기)에서 하지 않는 이유: 그 분기는 '끝난 뒤
+            # _open 을 지울지 반전으로 새로 열지'를 가르는 것일 뿐이고,
+            # trade 는 반전이든 완전청산이든 이미 위에서 완성돼 있다 —
+            # 거기서 if 분기 안에만 넣으면 반전으로 끝난 거래를 놓친다.
+            # IndicatorSnapshot 과 같은 자리(Trader, self.recorder/view_q)에서
+            # 같은 패턴으로 처리한다.
+            if self.recorder is not None:
+                self.recorder.put(trade)
+            if self.view_q is not None:
+                self.view_q.put(trade)
             self._save()
 
     def feed_timer(self, now: datetime):

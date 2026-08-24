@@ -315,9 +315,11 @@ class Engine:
         """시장 이벤트 하나. 이 엔진의 주 진입점이다.
 
         ★ 순서 ★
-          ① view_q 로 흘린다 — 밖에서 들어온 이벤트든, 아래서 재귀로 들어오는
-             봉이든 전부 여기를 한 번은 지난다. 콘솔 뷰가 보는 창구를 이
-             메서드 하나로 모아, LiveRunner가 따로 view_q에 넣지 않게 한다.
+          ① view_q/recorder 로 흘린다 — 밖에서 들어온 이벤트든, 아래서 재귀로
+             들어오는 봉이든 전부 여기를 한 번은 지난다. 콘솔 뷰가 보는 창구와
+             원본 이벤트 기록 창구를 이 메서드 하나로 모아, LiveRunner가 따로
+             챙기지 않게 한다. recorder에 해당 타입 구독이 없으면 Recorder가
+             조용히 버린다(_accept의 미구독 경고만 남는다).
           ② 브로커가 본다 — 시계·현재가 갱신. 전략이 target_pct 를 부를 때
              이미 기준가가 있어야 한다.
           ③ 전략에 배달한다.
@@ -329,15 +331,15 @@ class Engine:
         """
         if self.view_q is not None:
             self.view_q.put(ev)               # ①
+        if self.recorder is not None:
+            self.recorder.put(ev)             # ① 원본 Tick/Quote도 구독돼 있으면 기록
 
         self.portfolio.real.on_market(ev)    # ② 브로커 (구현 안 했으면 no-op)
         self.router.dispatch(ev)             # ③ 전략
 
         if ev.kind == "tick":
             for bar in self.bars.on_tick(ev):
-                if self.recorder is not None:
-                    self.recorder.put(bar)
-                self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다. view_q도 여기서 같이 탄다
+                self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다. view_q/recorder도 여기서 같이 탄다
 
     def feed_timer(self, now: datetime):
         """주기 호출(1초 등). 두 가지를 한다.
@@ -363,6 +365,10 @@ class Engine:
         if sid is None:
             return                                   # 주인 없는 체결 (수동주문 등)
         self.slots[sid].trader.feed_fill(fill)
+        if self.recorder is not None:
+            self.recorder.put(fill)
+        if self.view_q is not None:
+            self.view_q.put(fill)
 
     def feed_order(self, order: Order):
         """주문 상태 변화. 그 주문을 낸 전략에만 알린다."""

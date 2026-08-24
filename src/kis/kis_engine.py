@@ -92,7 +92,6 @@ class KiSEngine:
                     self.logger.info("market_event_queue 누적 %d건 (최근 tr_id=%s, kind=%s, symbol=%s)",
                                      count, parsed.tr_id, getattr(ev, "kind", type(ev).__name__),
                                      getattr(ev, "symbol", getattr(ev, "stock_code", "?")))
-                self.recorder.put(ev)
                 self.market_event_queue.put(ev)
 
     def _to_market_event(self, tr_id, record):
@@ -100,8 +99,14 @@ class KiSEngine:
             return events.from_execution(record)
         if tr_id == self.ws.tr_orderbook:
             return events.from_orderbook(record)
-        # 체결통보(H0STCNI0) 등 아직 MarketEvent로 정규화되지 않은 tr_id는
-        # 누락시키지 않고 파싱된 원본 객체를 그대로 흘려보낸다.
+        if tr_id == self.ws.tr_notice:
+            # 체결통보(H0STCNI0). SimBroker의 모의 체결통보와 같은
+            # events.Notice로 정규화해두면, LiveRunner가 실전/모의를
+            # 필드 이름으로 구분할 필요가 없어지고(둘 다 events.Notice),
+            # 다른 MarketEvent처럼 레코더·뷰에도 그대로 구독할 수 있다.
+            return events.from_notice(record)
+        # 아직 정규화 대상이 아닌 tr_id는 누락시키지 않고
+        # 파싱된 원본 객체를 그대로 흘려보낸다.
         return record
 
     def start_parsing(self):
