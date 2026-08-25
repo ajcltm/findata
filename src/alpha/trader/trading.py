@@ -811,8 +811,9 @@ class IndicatorSnapshot:
         지표는 라인마다 한 행이 된다. 단일 값이면 "".
 
     ■ trigger
-        "order" 주문 낼 때 — 사후 분석의 대부분이 여기서 나온다
-        "bar"   봉 마감마다 — 차트 재현용
+        "order" 주문 낼 때 — 사후 분석의 대부분이 여기서 나온다 (아직 미구현)
+        "bar"/"tick"/"quote"  그 이벤트가 지표를 갱신할 때마다 — ev.kind 그대로.
+                              봉이면 봉 마감마다, 틱 지표면 체결마다.
     """
     dt: datetime
     strategy_id: str
@@ -963,12 +964,24 @@ class Strategy:
         return {sym: self.ind(factory(), on=on, variant=variant, symbol=sym)
                 for sym in symbols}
 
-    def indicator_snapshot(self) -> dict[str, Optional[float]]:
+    def indicator_snapshot(self, ev: Optional[MarketEvent] = None) -> dict[str, Optional[float]]:
         """지금 지표들의 값. {label: value}
 
         기록·로그용. Trader 가 이벤트 처리 직후(훅 호출 직전)에 찍으면
-        '전략이 판단할 때 본 값'이 남는다."""
-        return {slot.label: slot.ind.value for slot in self._indicators}
+        '전략이 판단할 때 본 값'이 남는다.
+
+        ev 를 주면 그 이벤트에 매칭되는(= 방금 갱신된) 지표만 돌려준다.
+        안 주면 등록된 지표 전부의 현재 상태를 돌려준다.
+
+        ■ 왜 필요한가
+            한 전략이 여러 봉 주기(예: 60초+300초)를 같이 구독하면,
+            필터 없이 전부 돌려줄 경우 60초봉이 마감될 때마다 아직
+            안 바뀐 300초봉 지표까지 매번 같이 기록돼 중복이 쌓인다.
+            _record_indicators 가 이걸로 '방금 이 이벤트가 실제로
+            갱신한 지표'만 골라 기록한다."""
+        slots = (self._indicators if ev is None
+                else [s for s in self._indicators if s.matches(ev)])
+        return {slot.label: slot.ind.value for slot in slots}
 
     @property
     def ready(self) -> bool:
@@ -1171,10 +1184,11 @@ class Trader:
 
         ■ 게이트 순서
           ① 시작 전이면 무시
-          ② 봉이면 지표 갱신 + 워밍업 카운트
-             (지표는 봉 기반이므로 틱/호가로는 갱신하지 않는다.
-              틱 기반 지표가 필요하면 전략이 on_tick 에서 직접 돌린다)
-          ③ 지표가 준비 안 됐으면 on_bar 만 막는다
+          ② 지표 갱신 + 기록 — 이벤트 종류와 무관하게 매번 시도한다
+             (매칭되는 지표만 update/record 된다. 봉으로 국한하면
+              틱·호가 기반 지표는 영영 안 데워지고 기록도 안 남는다)
+          ③ 워밍업 카운터는 봉 기준으로 센다
+          ④ 지표가 준비 안 됐으면 on_bar 만 막는다
              — on_tick/on_quote 는 지표와 무관할 수 있으므로 통과시킨다
         """
         if not self._started:
@@ -1182,18 +1196,19 @@ class Trader:
 
         # ① 지표 갱신 — 모든 이벤트에 대해 시도한다.
         #    어떤 지표가 이 이벤트를 쓸지는 Strategy._update_indicators 가
-        #    등록 시 선언한 (kind, variant) 로 걸러낸다.
-        #    봉에서만 돌리면 틱·호가 기반 지표가 영영 안 데워진다.
+        #    등록 시 선언한 (kind, variant, symbol) 로 걸러낸다.
         self.strategy._update_indicators(ev)
+
+        # 지표 기록 — 이 이벤트에 매칭되는(=방금 갱신된) 지표만 기록한다.
+        # 봉으로 국한하지 않는다 — 틱/호가 기반 지표가 생기면 그 이벤트마다
+        # 기록·뷰에 남아야 봉 사이의 값을 확인할 수 있다.
+        self._record_indicators(ev)
 
         # ② 워밍업 카운터는 봉 기준이다.
         #    틱은 수만 개가 들어오므로 개수로 세는 게 의미가 없다.
         #    틱 전략의 워밍업은 지표의 ready 가 대신 막아준다.
         if ev.kind == "bar":
             self._bars += 1
-            # 워밍업 구간도 남긴다 — 지표가 데워지는 과정 자체가
-            # 사후 검증(차트 재현) 대상이다.
-            self._record_indicators(ev)
             if self._bars <= self.warmup:
                 return
 
@@ -1268,22 +1283,27 @@ class Trader:
 
     # ───────── 내부 ─────────
     def _record_indicators(self, ev: MarketEvent):
-        """지금 지표 값을 IndicatorSnapshot(long 포맷)으로 recorder 에 남기고
-        view_q 에도 흘려 콘솔 뷰(Pivot 등 구독 화면)에서 바로 보이게 한다.
+        """이 이벤트로 갱신된 지표 값을 IndicatorSnapshot(long 포맷)으로
+        recorder 에 남기고 view_q 에도 흘려 콘솔 뷰(Pivot 등 구독 화면)에서
+        바로 보이게 한다.
+
+        봉으로 국한하지 않는다 — 틱/호가 기반 지표가 등록돼 있으면 그
+        이벤트가 올 때마다 기록된다(indicator_snapshot(ev) 가 이 이벤트에
+        매칭되는 지표만 걸러준다).
 
         지표는 Engine.feed() 가 아니라 여기(Trader) 안에서만 만들어지는
         데이터라, Engine 이 자기 view_q/recorder 를 물려준 것을 그대로 쓴다
         — 그래야 Bar/외부이벤트(Engine.feed() 담당)와 같은 두 큐로 합쳐진다.
 
-        ev.dt 를 쓰는 이유: 기록 시각이 아니라 '그 봉 시각'이어야 재생·조인이
-        맞는다. 둘 다 None 이면(기록·뷰를 안 켰거나 백테스트) 아무 일도
-        하지 않는다."""
+        ev.dt 를 쓰는 이유: 기록 시각이 아니라 '그 이벤트 시각'이어야
+        재생·조인이 맞는다. 둘 다 None 이면(기록·뷰를 안 켰거나 백테스트)
+        아무 일도 하지 않는다."""
         if self.recorder is None and self.view_q is None:
             return
-        for label, value in self.strategy.indicator_snapshot().items():
+        for label, value in self.strategy.indicator_snapshot(ev).items():
             snap = IndicatorSnapshot(
                 dt=ev.dt, strategy_id=self.strategy_id, symbol=ev.symbol,
-                label=label, line="", value=value, trigger="bar",
+                label=label, line="", value=value, trigger=ev.kind,
             )
             if self.recorder is not None:
                 self.recorder.put(snap)

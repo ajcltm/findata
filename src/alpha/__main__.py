@@ -42,6 +42,7 @@ from kis.kis_engine import KiSEngine
 from alpha.alphatrader.alphatrader import AlphaTrader
 from alpha.events import events
 from alpha.recording.sinks import SqliteSink
+from alpha.strategy.indicator_watcher import IndicatorWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
 from alpha.trader.trading import IndicatorSnapshot, Fill, Trade
@@ -118,11 +119,19 @@ def build_trader(simul_mode: bool) -> AlphaTrader:
 
     trader.add_strategy("추세", SmaCrossATR(symbol=SYMBOL[0]),
                         allocation=5_000_000,
-                        bars=[(symbol, BAR_SECONDS) for symbol in SYMBOL],
+                        bars=[(SYMBOL[0], BAR_SECONDS)],
                         warmup=20)                  # 지표가 데워질 때까지 주문 차단
     trader.add_strategy("호가감시", SpreadWatcher(),
                         allocation=0,                # 주문 안 내므로 0
                         quotes=SYMBOL)
+
+    # 지표 뷰용 — 종목마다 독립된 인스턴스로 등록해야 값이 안 섞인다
+    # (IndicatorWatcher 문서 참고). "추세"는 SYMBOL[0]을 이미 커버하지만
+    # 매매용 인스턴스라 이 목적으로 재사용하지 않는다.
+    for symbol in SYMBOL:
+        trader.add_strategy(f"지표감시_{symbol}", IndicatorWatcher(symbol=symbol),
+                            allocation=0,
+                            bars=[(symbol, BAR_SECONDS)])
 
     # ── 레코더 구독 — AlphaTrader(Engine)가 다루는 데이터를 어디에 저장할지.
     #    Bar/IndicatorSnapshot은 Engine.feed()/Trader 안에서만 만들어지는

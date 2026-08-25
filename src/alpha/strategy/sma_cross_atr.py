@@ -27,10 +27,17 @@ class SmaCrossATR(Strategy):
                     atr_period=10, size_pct=0.9, stop_atr=2.0)
 
     def setup(self):
-        self.fast = self.ind(SMA(self.p.fast))
-        self.slow = self.ind(SMA(self.p.slow))
-        self.cross = self.ind(CrossOver(self.fast, self.slow))   # 입력 지표 뒤에
-        self.atr = self.ind(ATR(self.p.atr_period))
+        # symbol= 은 matches() 필터링(값 오염 방지)에만 쓰고, name= 으로
+        # 라벨은 심볼 접미사 없이 고정한다 — 종목마다 별도 인스턴스라
+        # 한 인스턴스 안에서 이름이 겹칠 일이 없고, 접미사가 붙으면
+        # Pivot 뷰에서 지표×종목 조합마다 칼럼이 따로 생겨버린다.
+        sym = self.p.symbol
+        fast, slow = SMA(self.p.fast), SMA(self.p.slow)
+        cross, atr = CrossOver(fast, slow), ATR(self.p.atr_period)
+        self.fast = self.ind(fast, symbol=sym, name=fast.name)
+        self.slow = self.ind(slow, symbol=sym, name=slow.name)
+        self.cross = self.ind(cross, symbol=sym, name=cross.name)   # 입력 지표 뒤에
+        self.atr = self.ind(atr, symbol=sym, name=atr.name)
         self.stop_price = None
 
     def on_bar(self, bar):
