@@ -45,7 +45,7 @@ from alpha.recording.sinks import SqliteSink
 from alpha.strategy.indicator_watcher import IndicatorWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
-from alpha.trader.trading import IndicatorSnapshot, Fill, Trade
+from alpha.trader.trading import IndicatorSnapshot, Fill, Trade, Order, Position
 from alpha.view import model
 
 log = logging.getLogger("main")
@@ -176,6 +176,16 @@ def build_trader(simul_mode: bool) -> AlphaTrader:
     trader.add_view(events.Bar, model.Recent(20, cols=[
         "symbol", "open", "high", "low", "close", "volume"]), name="봉")
     trader.add_view(IndicatorSnapshot, model.Pivot(), name="지표")
+
+    # Position/Order — 기록은 안 하고 뷰로만 흘린다(Engine.feed_fill/feed_order
+    # 참고). Board(by=...)는 같은 키가 오면 그 줄만 덮어쓰므로, 포지션은
+    # symbol별 최신 상태판이, 주문은 id별로 살아있는 것과 끝난 것이 한 판에서
+    # 각자 최신 상태로 보인다(주문이 FILLED/REJECTED 등으로 끝나도 그 줄은
+    # 안 사라지고 마지막 상태로 남는다 — '내역'으로 보기 좋다).
+    trader.add_view(Position, model.Board(by="symbol", cols=[
+        "size", "avg_price", "last_price"]), name="포지션")
+    trader.add_view(Order, model.Board(by="id", cols=[
+        "symbol", "side", "size", "filled_size", "price", "status"]), name="주문")
     return trader
 
 
@@ -208,7 +218,7 @@ def run_live(dry_run: bool):
     # 여기(메인 스레드)에서 kis.run() 리턴 뒤에 마저 처리한다 —
     # 뷰가 뜬 daemon 스레드에서 다 끝내려 하면, 메인 스레드가 먼저 빠져나가
     # daemon 스레드가 중간에 죽어 마지막 몇 건이 유실될 수 있다.
-    runner = trader.run_live(kis.market_event_queue, dry_run=dry_run, on_quit=kis.stop)
+    runner = trader.run_live(kis.market_event_queue, dry_run=dry_run, on_quit=kis.stop, ws=kis.ws)
 
     # trading/show 는 KiSEngine 자체 기능이라 여기선 안 쓴다 —
     # 주문 경로는 이미 AlphaTrader.run_live() 가 맡았다.
@@ -227,7 +237,7 @@ def run_sim(simul):
     build_recording(kis, simul_mode=simul_mode)
     trader = build_trader(simul_mode=simul_mode)
 
-    runner = trader.run_sim(kis.market_event_queue, on_quit=kis.stop)
+    runner = trader.run_sim(kis.market_event_queue, on_quit=kis.stop, ws=kis.ws)
     kis.run(recording=True, trading=False, show=False)   # 블로킹 — q → kis.stop() 이 풀어준다
 
     runner.stop()

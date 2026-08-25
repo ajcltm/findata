@@ -106,22 +106,29 @@ def detail(m, width: int) -> list[str]:
     return table(m.header(), rows, width) + ["", f" {m.page_label}"]
 
 
-def orders(m, width: int) -> list[str]:
-    rows = m.rows()
-    if m.loading and not m.total:
-        return ["", " 조회 중..."]
-    if m.error and not m.total:
-        return ["", f" 조회 실패: {m.error}", " [u] 재시도"]
+def order_entry(m, width: int) -> list[str]:
+    """수동 주문 화면. 구독 종목 번호 목록 + 사용법 + 마지막 주문 결과.
 
-    head = (f" {'주문번호':<12}{'종목':<8}{'구분':<6}"
-            f"{'수량':>8}{'단가':>10}{'상태':>10}")
-    out = [head, " " + "-" * (len(head) - 2)]
-    for o in rows:
-        out.append(f" {o.order_no:<12}{o.code:<8}{o.side:<6}"
-                   f"{o.qty:>8,}{o.price:>10,}{o.status:>10}")
-    if not m.total:
-        out.append(" 주문이 없습니다.")
-    out += ["", _status(m)]
+    주문 내역(Position/Order)은 여기서 안 보여준다 — Engine.feed_fill/
+    feed_order 가 이미 view_q 로 흘려서 구독 화면('v')의 Board 패널에서
+    실시간으로 보인다. 이 화면은 주문을 '넣는' 데 집중한다."""
+    symbols = m.symbols()
+    out = [" 구독 종목", ""]
+    if not symbols:
+        out.append("  (구독 중인 종목이 없습니다 — 번호 대신 종목코드를 직접 입력하세요)")
+    else:
+        for i, sym in enumerate(symbols, start=1):
+            out.append(f"  [{i:>2}] {sym}")
+    out += [
+        "",
+        " 사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]",
+        "        -p 생략 시 시장가. 종목코드를 직접 쓰면 구독 안 한",
+        "        종목도 주문할 수 있다.",
+        "        예) o -s 1 -q 10 -d buy",
+        "            o -s 005930 -q 10 -d sell -p 70000",
+    ]
+    if m.last_result:
+        out += ["", f" 마지막 결과: {m.last_result}"]
     return out
 
 
@@ -141,13 +148,3 @@ def feed(m, width: int) -> list[str]:
     if not m.total:
         body = [" 수신 대기 중..."]
     return [" " + m.menu()[:width - 1], ""] + body + ["", " " + m.status()[:width - 1]]
-
-
-def _status(m) -> str:
-    if m.loading:
-        return " 조회 중..."
-    if m.error:
-        return f" 조회 실패: {m.error}  [u] 재시도"
-    if m.loaded_at:
-        return f" 기준 {m.loaded_at:%H:%M:%S}"
-    return ""

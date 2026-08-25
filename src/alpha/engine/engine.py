@@ -364,11 +364,18 @@ class Engine:
         sid = self.portfolio.owner_of(fill.order_id)
         if sid is None:
             return                                   # 주인 없는 체결 (수동주문 등)
-        self.slots[sid].trader.feed_fill(fill)
+        self.slots[sid].trader.feed_fill(fill)      # ← StrategyBroker._pos 갱신은 여기서 끝난다
         if self.recorder is not None:
             self.recorder.put(fill)
         if self.view_q is not None:
             self.view_q.put(fill)
+            # 포지션은 기록하지 않고 뷰로만 흘린다. 이 체결로 바뀐 건
+            # sid 하나의 포지션뿐이지만, 전략마다 따로 추적하는 대신
+            # 매 체결마다 전체 포지션판을 다시 흘리는 쪽이 더 단순하다
+            # (Board 뷰는 symbol 별로 마지막 값만 덮어쓰므로 중복 push가 문제되지 않는다).
+            for v in self.portfolio._views.values():
+                for pos in v._pos.values():
+                    self.view_q.put(pos)
 
     def feed_order(self, order: Order):
         """주문 상태 변화. 그 주문을 낸 전략에만 알린다."""
@@ -376,6 +383,13 @@ class Engine:
         if sid is None:
             return
         self.slots[sid].trader.feed_order(order)
+        if self.view_q is not None:
+            # order 객체 자체를 흘린다(현재 열린 것만 모아 흘리지 않는 이유:
+            # 주문이 막 체결/거부/취소로 끝나는 그 전환 순간에는 이미
+            # open_orders() 에서 빠져 있어서, '열린 것만' 모으면 종료 상태로
+            # 넘어가는 마지막 갱신을 영영 못 본다). id 로 구분하는 Board 뷰를
+            # 붙이면 살아있는 주문과 끝난 주문이 한 판에서 각자 최신 상태로 보인다.
+            self.view_q.put(order)
 
     def feed_execution(self, broker_id: str, status: str,
                        filled_qty: float, price: float, dt: datetime):

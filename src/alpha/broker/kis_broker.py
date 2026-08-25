@@ -64,12 +64,13 @@ class KISBroker(Broker):
     """Broker ABC 가 요구하는 7개(cash/equity/now/position/open_orders/
     submit/cancel)만 채우면 buy/sell/close/target_pct 는 베이스가 만들어준다.
 
-    api: 기존 KIS REST 래퍼. 아래 4개만 있으면 된다.
-         api.place_order(symbol, side, qty, price) -> 주문번호
-         api.cancel_order(order_no, symbol, qty)
-         api.fetch_balance() -> (예수금, 총평가, {symbol: (수량, 평단)})
-         api.fetch_open_orders() -> [{...}]
-    """
+    REST 호출은 self.api 가 아니라 kis_api 모듈 함수를 직접 부른다
+    (kis_api.place_order, kis_api.balance 등) — submit()/sync_balance() 참고.
+
+    ⚠ cancel() 은 아직 self.api.cancel_order(...) 를 부르는데 self.api 가
+      이 클래스에 없다(생성자가 인자를 안 받는다) — 실제로 취소를 타면
+      AttributeError 로 실패한다. sync_balance() 와 같은 문제라
+      kis_api 쪽에 취소 함수가 생기면 여기도 같은 방식으로 고쳐야 한다."""
 
     def __init__(self):
 
@@ -251,17 +252,31 @@ class KISBroker(Broker):
         """느린 경로 — REST 폴링. 몇 초~수십 초 주기로 부른다.
 
         이게 '정답'이다. 웹소켓으로 추정해둔 값을 통째로 덮어쓴다.
-        추정 로직에 버그가 있어도 폴링이 주기적으로 바로잡아주는 구조다."""
-        cash, equity, positions = self.api.fetch_balance()
-        with self._lock:
-            self._cash, self._equity = cash, equity
+        추정 로직에 버그가 있어도 폴링이 주기적으로 바로잡아주는 구조다.
 
-            for sym, (size, avg) in positions.items():
+        kis_api.balance() 가 잔고조회 응답을 (positions, cash, equity)로
+        간추려준다 — positions 는 {종목코드: (수량, 평단)} 이고, 보유
+        종목이 하나도 없으면 None 이다. 전부 KIS가 문자열로 주는 값이라
+        여기서 float 로 바꾼다(안 바꾸면 이후 수량 계산에서 str+float 로
+        터진다)."""
+        pos, cash, equity = kis_api.balance()
+        with self._lock:
+            if cash is not None:
+                self._cash = float(cash)
+            if equity is not None:
+                self._equity = float(equity)
+
+            # ★ 통째로 새로 만든다(갱신이 아니라 교체) ★
+            #   응답에 없는 종목은 이제 안 갖고 있다는 뜻이다 — 갱신만
+            #   하면 전량 청산된 종목이 로컬에 영원히 낡은 값으로 남는다.
+            new_positions: dict[str, Position] = {}
+            for sym, (size, avg) in (pos or {}).items():
                 # 현재가는 API 잔고응답이 아니라 웹소켓에서 온다.
                 # 여기서 Position 을 통째로 새로 만들면 last_price 가 날아가므로
                 # 기존 값을 꺼내 보존한다.
                 last = self._positions.get(sym, Position(sym)).last_price
-                self._positions[sym] = Position(sym, size, avg, last)
+                new_positions[sym] = Position(sym, float(size), float(avg), last)
+            self._positions = new_positions
 
             # 예약금도 살아있는 주문 기준으로 재계산한다.
             # 거부·취소 때 _reserved 를 못 빼서 생긴 누수를 여기서 청소하는 셈.

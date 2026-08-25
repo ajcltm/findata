@@ -34,7 +34,11 @@
 
 from __future__ import annotations
 
+import shlex
+
 from alpha.view import model, view
+from alpha.strategy.manual import MANUAL_STRATEGY_ID
+from alpha.trader.trading import OrderStatus
 from kis import kis_websocket
 
 
@@ -45,11 +49,17 @@ class Controller:
         name   화면 이름. app.goto("realdata") 의 그 이름이다
         title  화면 상단에 뜨는 제목
         view   (model, width) -> list[str] 함수. kis_view 의 것을 쓴다
-    """
+
+    render_interval : None 이면 Runtime 의 기본 주기(보통 1초)를 그대로
+        쓴다. 명령을 길게 타이핑해야 하는 화면(수동 주문 등)은 그 주기로
+        화면이 지워지면 입력 중에 지워져 버리므로, 그런 화면만 값을 늘려
+        오버라이드한다. nudge() 는 그래도 즉시 깨우므로 키 처리 자체는
+        느려지지 않는다."""
 
     name: str = ""
     title: str = ""
     view = None                     # (model, width) -> list[str]
+    render_interval: float | None = None
 
     def __init__(self, m):
         self.model = m
@@ -76,8 +86,13 @@ class Controller:
         return type(self).view(self.model, width)
 
     def hint(self) -> str:
-        """화면 맨 아래에 쓸 키 목록.  "  [j] [k] [h] [q]" 같은 것."""
-        keys = list(self.keymap) + ["h", "r", "o", "v", "b", "q"]
+        """화면 맨 아래에 쓸 키 목록.  "  [j] [k] [h] [q]" 같은 것.
+
+        전역 키와 같은 글자를 화면이 자기 keymap 에 넣어 가리는 경우
+        (예: 주문 화면의 'o') 목록에 중복으로 안 뜨게 거른다."""
+        globals_ = [k for k in ("h", "r", "o", "v", "b", "q")
+                   if k not in self.keymap]
+        keys = list(self.keymap) + globals_
         return "  " + " ".join(f"[{k}]" for k in keys)
 
 
@@ -197,50 +212,157 @@ class DetailController(Controller):
         self.model.code = None
 
 
-class OrdersController(PagedKeys, Controller):
-    """주문 내역 — 증권사 API 로 조회한다.
+def _parse_flags(arg: str) -> dict[str, str]:
+    """"-s 1 -q 10 -p 70000 -d buy" → {"s":"1","q":"10","p":"70000","d":"buy"}.
 
-    ■ 조회가 세 단계로 나뉘는 이유
-        네트워크는 느리다. 그동안 화면이 멈추면 안 되므로
-        '조회 중' 을 먼저 그리고, 결과가 오면 그때 채운다.
+    "-"로 시작하는 토큰을 키로, 그 다음 토큰을 값으로 묶는다.
+    shlex 를 쓰는 이유는 그냥 str.split() 보다 견고해서다(따옴표 등)."""
+    tokens = shlex.split(arg)
+    out: dict[str, str] = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.startswith("-") and len(tok) > 1 and i + 1 < len(tokens):
+            out[tok.lstrip("-")] = tokens[i + 1]
+            i += 2
+        else:
+            i += 1
+    return out
 
-            begin()  화면에 "조회 중..." 이 뜬다
-            (워커 스레드에서 API 호출)
-            done()   결과를 모델에 넣는다 — 렌더 스레드에서
-    """
 
-    name, title = "orders", "주문 내역"
-    view = staticmethod(view.orders)
+class OrderEntryController(Controller):
+    """수동 주문 — 구독 종목 번호 목록을 보여주고, 콘솔 명령으로 broker 에
+    직접 실제 주문을 넣는다.
 
-    def __init__(self, ctx, order_api):
-        super().__init__(model.Orders(ctx))
-        self.api = order_api            # 조회 서비스. 없으면 None
-        self.keymap["u"] = self._refresh
+    ■ 'o' 가 두 가지 일을 한다
+        다른 화면에서 누르면(전역 키, Router.GLOBAL_KEYS) 이 화면으로
+        이동만 한다. 이 화면에서 인자를 붙여 누르면(로컬 keymap 이 전역
+        키를 가린다 — Controller.hint() 주석 참고) 그 인자를 주문
+        명령으로 해석해 실제로 주문을 낸다.
 
-    def on_enter(self, app, account=None, **opts):
-        self.model.account = account
-        self.model.top()
-        self._load(app)                 # 화면은 이미 떠 있고 조회만 뒤따른다
+            o                              화면 진입/새로고침 (주문 아님)
+            o -s 1 -q 10 -d buy            1번 종목 10주 시장가 매수
+            o -s 005930 -q 10 -d sell -p 70000   구독 안 한 종목도 지정가로
 
-    def _refresh(self, app, arg):
-        """새로고침"""
-        self._load(app)
+    ■ -s 가 번호인지 종목코드인지
+        국내 종목코드는 항상 6자리라, 6자리가 아닌 숫자만 번호(목록의
+        몇 번째)로 본다. 그래서 "005930"처럼 실제 코드를 그대로 써도
+        번호로 오인되지 않고, 구독하지 않은 종목도 코드로 주문할 수 있다.
 
-    def _load(self, app):
-        if self.api is None:
-            self.model.fail("주문 API가 연결되지 않았습니다.")
+    ■ 왜 여기서 네트워크를 직접 안 부르나
+        broker.buy()/sell() 이 실브로커(KISBroker)까지 내려가면 REST
+        호출이 될 수 있다. 입력 스레드에서 그대로 부르면 응답이 올 때까지
+        키 입력이 멈춘다 — 반드시 app.submit 으로 워커에 넘긴다."""
+
+    name, title = "orders", "수동 주문"
+    view = staticmethod(view.order_entry)
+    # 명령이 길다(-s -q -d -p) — 기본 1초 주기로 화면이 지워지면 타이핑
+    # 도중에 지워진다. 다 쓸 때까지 여유를 주고, 결과 확인 후 반응은
+    # nudge()가 여전히 즉시 처리한다.
+    render_interval = 60.0
+
+    def __init__(self, ctx):
+        super().__init__(model.OrderEntry(ctx))
+        self.keymap["o"] = self._submit
+
+    def _submit(self, app, arg):
+        """주문 (-s 번호|종목코드 -q 수량 -d buy|sell [-p 가격], p 생략 시 시장가)"""
+        if not arg:
+            app.ctx.flash("사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]")
             return
 
-        m = self.model
-        m.begin()                       # 화면에 "조회 중..." 이 뜬다
+        try:
+            symbol, side, qty, price = self._parse_order(arg)
+        except ValueError as e:
+            app.ctx.flash(str(e))
+            return
 
-        def call_api():
-            """워커 스레드에서 실행된다. 여기서 모델을 만지면 안 된다."""
-            return self.api.list_orders(m.account)
+        broker = self._manual_broker(app)
+        if broker is None:
+            app.ctx.flash("수동 주문 전략이 연결되지 않았습니다.")
+            return
 
-        # 세 인자: 로그용 이름 / 워커에서 돌릴 함수 / 렌더에서 돌릴 콜백
-        # 예외가 나면 submit 이 잡아서 flash 로 띄운다.
-        app.submit("주문 조회", call_api, m.done)
+        def place():
+            """워커 스레드에서 실행된다. 실전이면 여기서 REST 호출이 나간다."""
+            fn = broker.buy if side == "buy" else broker.sell
+            return fn(symbol, qty, price=price, tag="manual")
+
+        def done(order):
+            """렌더 스레드에서 실행된다. 모델은 여기서만 만진다.
+
+            ★ 여기서 order 를 view_q 에 직접 넣는 이유 ★
+              Engine.feed_order() 는 체결통보(Notice)가 와서 주문 상태가
+              바뀔 때만 불린다 — 방금 낸 주문은 아직 그런 통보를 못
+              받았다. 지정가 주문은 체결될 때까지(또는 영영 안 될 수도
+              있다) feed_order() 가 단 한 번도 안 불려서, 여기서 안 넣으면
+              'v' 화면의 주문 Board 에 영원히 안 보인다. 나중에 체결/거부
+              통보가 오면 Engine.feed_order() 가 같은 order.id 로 그 줄을
+              최신 상태로 갱신한다."""
+            if order is not None:
+                app.view_q.put(order)
+            self.model.last_result = self._describe(symbol, side, qty, order)
+            app.ctx.flash(self.model.last_result)
+
+        app.submit(f"{symbol} {side} 주문", place, done)
+
+    # ── 명령 해석 ────────────────────────────────────────────
+    def _parse_order(self, arg: str) -> tuple[str, str, float, "float | None"]:
+        opts = _parse_flags(arg)
+
+        raw_symbol = opts.get("s")
+        if not raw_symbol:
+            raise ValueError("사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]")
+        symbol = self._resolve_symbol(raw_symbol)
+        if symbol is None:
+            raise ValueError(f"{raw_symbol}: 해당 번호의 종목이 없습니다.")
+
+        side = (opts.get("d") or "").lower()
+        if side not in ("buy", "sell"):
+            raise ValueError("-d buy 또는 -d sell 이 필요합니다.")
+
+        try:
+            qty = float(opts["q"])
+        except (KeyError, ValueError):
+            raise ValueError("-q 수량(숫자)이 필요합니다.")
+        if qty <= 0:
+            raise ValueError("-q 수량은 0보다 커야 합니다.")
+
+        price = None
+        if "p" in opts:
+            try:
+                price = float(opts["p"])
+            except ValueError:
+                raise ValueError("-p 가격이 숫자가 아닙니다.")
+
+        return symbol, side, qty, price
+
+    def _resolve_symbol(self, s: str) -> str | None:
+        """번호(목록 인덱스, 1부터) 또는 종목코드 그대로.
+
+        종목코드는 항상 6자리라, 6자리가 아닌 숫자 문자열만 번호로 본다
+        — "005930"이 번호 5930으로 오인되는 일이 없다."""
+        symbols = self.model.symbols()
+        if s.isdigit() and len(s) != 6:
+            idx = int(s) - 1
+            return symbols[idx] if 0 <= idx < len(symbols) else None
+        return s                # 종목코드 그대로 — 구독 여부와 무관하게 허용
+
+    def _manual_broker(self, app):
+        """수동 주문 전략(alpha.strategy.manual.MANUAL_STRATEGY_ID)의
+        StrategyBroker. engine 이 아직 안 붙었으면(연결 전/백테스트) None."""
+        engine = app.ctx.engine
+        if engine is None:
+            return None
+        slot = engine.slots.get(MANUAL_STRATEGY_ID)
+        return slot.view if slot else None
+
+    def _describe(self, symbol: str, side: str, qty: float, order) -> str:
+        if order is None:
+            return f"{symbol} {side} 주문 무시됨 (미체결 주문 존재 또는 최소수량 미만)"
+        if order.status is OrderStatus.REJECTED:
+            return f"{symbol} {side} 주문 거부: {order.reject_reason}"
+        kind = f"{order.price:,.0f}원 지정가" if order.price else "시장가"
+        return f"{symbol} {side} {qty:g}주 {kind} 주문 접수 (id={order.id})"
 
 
 class FeedController(PagedKeys, Controller):
@@ -292,7 +414,7 @@ class FeedController(PagedKeys, Controller):
             self.title = f"구독 화면 · {panel.name}"
 
 
-def build_controllers(ctx, order_api=None) -> list[Controller]:
+def build_controllers(ctx) -> list[Controller]:
     """화면 목록을 만든다. Application 이 알아서 부른다.
 
     화면을 하나 더 만들었다면 여기에 추가하면 된다.
@@ -305,6 +427,6 @@ def build_controllers(ctx, order_api=None) -> list[Controller]:
         HomeController(ctx),
         RealDataController(ctx),
         DetailController(ctx),
-        OrdersController(ctx, order_api),
+        OrderEntryController(ctx),
         FeedController(ctx),
     ]

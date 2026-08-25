@@ -654,6 +654,29 @@ def domestic_stock_inquire_balance():
     r = requests.get(url, headers=headers, params=params, timeout=10)
     return r.json()
 
+def balance():
+    r = domestic_stock_inquire_balance()
+
+    output1 = r.get("output1")
+
+    # output1이 비어있거나([]) None이면 pos를 None으로 처리
+    if not output1:
+        pos = None
+    else:
+        pos = dict()
+        for item in output1:
+            sym = item.get("pdno")
+            size = item.get("hldg_qty")
+            avg = item.get("pchs_avg_pric")
+            pos[sym] = (size, avg)
+
+    # output2 데이터 추출 (output2가 비어있을 경우를 대비한 안전한 접근)
+    output2 = r.get("output2", [{}])
+    cash = output2[0].get("dnca_tot_amt") if output2 else None
+    equity = output2[0].get("tot_evlu_amt") if output2 else None
+
+    return pos, cash, equity
+
 def domestic_stock_order_reserve():
     """
     [주식예약주문]

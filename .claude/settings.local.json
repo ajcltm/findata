@@ -7,7 +7,8 @@
       "Bash(del \"f:\\\\KIM\\\\020_Project\\\\260207.010_금융데이터\\\\resources\\\\kis\\\\_output_readable.txt\")",
       "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
       "Bash(python -m py_compile src/alpha/events/events.py src/kis/kis_engine.py src/alpha/broker/sim_broker.py src/alpha/engine/live_runner.py)",
-      "Bash(python -m py_compile src/alpha/__main__.py)"
+      "Bash(python -m py_compile src/alpha/__main__.py)",
+      "Bash(python -m py_compile src/alpha/view/controller.py)"
     ]
   }
 }

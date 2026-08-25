@@ -719,12 +719,19 @@ class FeedHub:
 class AppCtx:
     """전 화면이 공유하는 데이터.
 
-    ws 는 없어도 된다 — 종목 구독 기능을 안 쓰면 None 이면 그만이다."""
+    ws/engine 은 없어도 된다 — 그 기능(종목 구독/수동 주문)을 안 쓰면
+    None 이면 그만이다."""
 
-    def __init__(self, ws=None, view_q=None, feed: "FeedHub | None" = None):
+    def __init__(self, ws=None, view_q=None, feed: "FeedHub | None" = None,
+                 engine=None):
         self.ws = ws                        # 웹소켓 엔진 (종목 구독용)
         self.inbox = Inbox(view_q)          # 큐 통계 → 홈 대시보드
         self.feed = feed or FeedHub()       # 구독형 화면
+        # Engine. 콘솔 수동 주문 화면이 engine.slots[...] 로 StrategyBroker를
+        # 찾아 실제 주문을 낸다. Application 생성 시점엔 아직 없을 수 있어
+        # (view_q를 먼저 줘야 Engine을 만들 수 있으므로) 나중에
+        # app.ctx.engine = eng 로 채워 넣는 것도 허용한다.
+        self.engine = engine
         self._flash: str | None = None
         self._lock = threading.Lock()
 
@@ -851,30 +858,35 @@ class Detail(Paged):
         return self.page([r for r in p.agg.rows() if r and self.code in r[0]])
 
 
-class Orders(Paged):
+class OrderEntry(ScreenModel):
+    """수동 주문 화면 — 구독 종목 번호 목록을 보여주고, 콘솔 명령
+    ("o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]")으로 실제 주문을
+    낸다. 명령 해석과 주문 전송은 OrderEntryController 가 한다.
+
+    ■ 주문 내역을 여기서 쌓지 않는다
+        Position/Order 는 이미 Engine.feed_fill/feed_order 가 view_q 로
+        흘려서 구독 화면('v')의 Board 패널에 실시간으로 보인다. 이 화면은
+        '주문을 넣는' 용도에 집중하고, 넣은 결과는 그쪽에서 확인한다."""
+
     def __init__(self, ctx):
         super().__init__(ctx)
-        self.orders: list = []
-        self.account: str | None = None
-        self.loading = False
-        self.error: str | None = None
-        self.loaded_at: datetime.datetime | None = None
+        self.last_result: str = ""      # 마지막 주문 시도 결과 한 줄
 
-    def rows(self) -> list:
-        return self.page(self.orders)
+    def symbols(self) -> list[str]:
+        """번호 목록에 쓸 구독 종목 코드. ws 가 없으면 빈 리스트.
 
-    # 조회 상태 -----------------------------------------------
-    def begin(self):
-        self.loading, self.error = True, None
-
-    def done(self, orders: list):
-        self.loading = False
-        self.loaded_at = datetime.datetime.now()
-        self.orders = orders
-        self.top()
-
-    def fail(self, msg: str):
-        self.loading, self.error = False, msg
+        price_codes/orderbook_codes 를 합치되 순서를 지키고 중복을 없앤다
+        (이 앱에서는 보통 둘이 같은 목록이다). 번호가 가리키는 건 이
+        리스트의 인덱스이므로, 화면에 찍는 순서와 여기 순서가 같아야 한다."""
+        ws = self.ctx.ws
+        if ws is None:
+            return []
+        seen: list[str] = []
+        for code in (list(getattr(ws, "price_codes", ()))
+                     + list(getattr(ws, "orderbook_codes", ()))):
+            if code not in seen:
+                seen.append(code)
+        return seen
 
 
 class Feed(Paged):

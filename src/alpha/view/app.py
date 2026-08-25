@@ -26,7 +26,7 @@ class Router:
     GLOBAL_KEYS = {
         "h": lambda app, arg: app.goto("home"),
         "r": lambda app, arg: app.goto("realdata"),
-        "o": lambda app, arg: app.goto("orders", account=arg or None),
+        "o": lambda app, arg: app.goto("orders"),
         "v": lambda app, arg: app.goto("feed"),
         "b": lambda app, arg: app.back(),
         "?": lambda app, arg: app.ctx.flash(app.help_text()),
@@ -105,7 +105,13 @@ class Runtime:
                 self._paint()
             except Exception:
                 log.exception("렌더 실패, 다음 프레임에서 재시도")
-            self._wake.wait(self.interval)
+            # 화면마다 다른 주기를 쓸 수 있다(Controller.render_interval).
+            # 명령을 길게 타이핑하는 화면(수동 주문 등)은 기본 1초 주기로
+            # 화면이 지워지면 입력 중에 지워져 버린다 — 그런 화면만 느리게
+            # 그린다. nudge()는 그래도 즉시 깨우므로 명령 처리 후 반응은
+            # 여전히 빠르다.
+            interval = getattr(self.app.router.current, "render_interval", None)
+            self._wake.wait(interval if interval is not None else self.interval)
             self._wake.clear()
 
     def _paint(self) -> None:
@@ -228,18 +234,20 @@ class Application:
         안 주면 view_q / ws 로 알아서 만든다.
     """
 
-    def __init__(self, view_q=None, ctx=None, ws=None, controllers=None,
-                 order_api=None, start="home", interval=1.0, workers=4,
+    def __init__(self, view_q=None, ctx=None, ws=None, engine=None,
+                 controllers=None, start="home", interval=1.0, workers=4,
                  on_quit=None):
         from alpha.view.controller import build_controllers
         from alpha.view.model import AppCtx
 
         self.view_q = view_q or queue.Queue()
 
-        self.ctx = ctx or AppCtx(ws=ws, view_q=self.view_q)
+        # engine 은 종종 Application 보다 늦게 만들어진다(view_q 를 먼저
+        # 줘야 하므로) — 그럴 땐 None 으로 시작해서 나중에
+        # app.ctx.engine = eng 로 채워도 된다. AppCtx 는 그냥 속성이다.
+        self.ctx = ctx or AppCtx(ws=ws, view_q=self.view_q, engine=engine)
         # 컨트롤러를 안 주면 기본 세트를 만든다. 화면을 늘려도 호출부는 그대로.
-        self.controllers = controllers or build_controllers(
-            self.ctx, order_api)
+        self.controllers = controllers or build_controllers(self.ctx)
         self.router = Router(self.controllers, start)
         self.runtime = Runtime(self, self.view_q, interval, workers, on_quit)
         self._thread: threading.Thread | None = None

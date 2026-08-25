@@ -27,6 +27,7 @@ from alpha.engine.engine import Engine
 from alpha.engine.live_runner import LiveRunner
 from alpha.broker.kis_broker import KISBroker
 from alpha.broker.sim_broker import SimBroker
+from alpha.strategy.manual import ManualStrategy, MANUAL_STRATEGY_ID
 from alpha.trader.trading import Strategy
 from alpha.recording.recorder import Recorder
 from alpha.view.app import Application
@@ -95,6 +96,22 @@ class AlphaTrader:
                 list(ticks), list(quotes), list(bars))
         return self
 
+    def _ensure_manual_strategy(self) -> None:
+        """콘솔 수동 주문의 그릇이 되는 전략을 한 번만 등록한다.
+
+        배정자본을 무제한(float("inf"))으로 주면 StrategyBroker.submit()의
+        예산 검사('필요금액 > 가용현금')가 항상 False가 되어 실질적으로
+        막히지 않는다 — Broker/StrategyBroker 코드를 하나도 안 건드리고
+        '무제한'을 표현하는 가장 단순한 방법이다.
+
+        run_live/run_sim에서만 부른다 — 백테스트에는 콘솔이 없어 이 슬롯을
+        쓸 일이 없고, allocation=inf인 슬롯이 백테스트 리포트에
+        nan%/inf원으로 잡히는 것도 피한다."""
+        if any(s["strategy_id"] == MANUAL_STRATEGY_ID for s in self._specs):
+            return                                  # 이미 등록됨 — 멱등
+        self.add_strategy(MANUAL_STRATEGY_ID, ManualStrategy(),
+                          allocation=float("inf"))
+
     # ── 레코더 구독 등록 ─────────────────────────────────────────
     def add_recording(self, dtype: type, sink, name: Optional[str] = None,
                        **kwargs) -> "AlphaTrader":
@@ -148,22 +165,31 @@ class AlphaTrader:
     def run_live(self, market_event_queue, dry_run: bool = True,
                  business_date: Optional[date] = None,
                  kill_file: str = "./STOP_TRADING",
-                 on_quit: Optional[Callable[[], None]] = None) -> LiveRunner:
+                 on_quit: Optional[Callable[[], None]] = None,
+                 ws=None) -> LiveRunner:
         """실계좌. market_event_queue 는 KiSEngine.market_event_queue —
         웹소켓 수신·파싱·정규화가 이미 끝난 MarketEvent/Notice 스트림이다.
 
         on_quit : 콘솔에서 'q'를 누르면 불린다. 데이터 소스(KiSEngine.stop)를
                   세우는 것까지만 책임진다 — 그래야 kis.run()의 블로킹이
                   풀리고, 다운스트림 드레인·flush는 호출자(메인 파일)가
-                  kis.run() 리턴 뒤에 이어서 한다."""
+                  kis.run() 리턴 뒤에 이어서 한다.
+        ws      : KiSEngine.ws(KisFeed). 콘솔의 수동 주문 화면이 '구독 중인
+                  종목' 번호 목록을 보여주는 데 쓴다 — 없어도 동작하지만
+                  그 화면에서 번호 목록이 비어 보인다."""
         log.info("AlphaTrader.run_live 시작 — 전략 %d개, dry_run=%s", len(self._specs), dry_run)
         broker = KISBroker()
+        self._ensure_manual_strategy()
 
         # Application(view_q)을 Engine보다 먼저 만든다 — Engine.feed()가
         # 만드는 봉/외부이벤트를 view_q로 바로 흘리려면 Engine 생성 시점에
         # 그 큐가 이미 있어야 한다.
-        app = self._apply_view(Application(on_quit=on_quit))
+        app = self._apply_view(Application(on_quit=on_quit, ws=ws))
         eng = self._build_engine(broker, dry_run, view_q=app.view_q)
+        # 콘솔 수동 주문 화면이 engine.slots[...] 로 StrategyBroker를 찾아야
+        # 해서, Engine이 만들어진 뒤에 ctx에 심는다(Application보다 늦게
+        # 생기므로 생성자에서 바로 못 준다).
+        app.ctx.engine = eng
 
         runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=False, dry_run=dry_run,
@@ -177,6 +203,7 @@ class AlphaTrader:
                 business_date: Optional[date] = None,
                 kill_file: str = "./STOP_TRADING",
                 on_quit: Optional[Callable[[], None]] = None,
+                ws=None,
                 **sim_broker_kwargs) -> LiveRunner:
         """모의투자. 실시간 market_event_queue 로 시세를 받되 주문은 가짜다.
 
@@ -184,11 +211,14 @@ class AlphaTrader:
           fill_q=market_event_queue 로 넘기면 시세와 모의체결이 한 큐에서
           순서대로 나온다 — LiveRunner 가 실전과 똑같은 소비 루프로 처리한다.
 
-        on_quit : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다."""
+        on_quit : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다.
+        ws      : run_live 와 같다 — 수동 주문 화면의 종목 번호 목록용."""
         log.info("AlphaTrader.run_sim 시작 — 전략 %d개, cash=%s", len(self._specs), cash)
         broker = SimBroker(fill_q=market_event_queue, cash=cash, **sim_broker_kwargs)
-        app = self._apply_view(Application(on_quit=on_quit))
+        self._ensure_manual_strategy()
+        app = self._apply_view(Application(on_quit=on_quit, ws=ws))
         eng = self._build_engine(broker, dry_run=False, view_q=app.view_q)   # 모의는 항상 가짜주문을 낸다
+        app.ctx.engine = eng
         runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=True, dry_run=False,
                             business_date=business_date, kill_file=kill_file)
