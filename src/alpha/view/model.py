@@ -419,7 +419,7 @@ class Latest(Aggregator):
         if not self.row:
             return []
         field_names = self.cols or list(self.row)
-        return [[name, cell(self.row.get(name), 40)] for name in field_names]
+        return [[name, cell(self.row.get(name), 1000)] for name in field_names]
 
     def footer(self) -> str:
         if not self.received_at:
@@ -604,12 +604,19 @@ class Panel:
             → 005930 의 Tick 만 최근 20건으로
     """
 
-    def __init__(self, dtype: Type, agg: Aggregator, name: str, where=None):
+    def __init__(self, dtype: Type, agg: Aggregator, name: str, where=None,
+                 render_interval: float | None = None):
         self.dtype = dtype      # 이 타입의 객체만 받는다
         self.agg = agg          # 집계 방식
         self.name = name        # 화면 이름
         self.where = where      # 필터 조건 (아래 _passes 참조)
         self.seen = 0           # 지금까지 받은 건수
+        # None 이면 Runtime 기본 주기(보통 1초)를 그대로 쓴다. 타이핑
+        # 도중 화면이 자꾸 지워지면 안 되는 패널(예: 주문 취소를 'oc'로
+        # 타이핑하는 주문 패널)만 구독 시점에 값을 준다 —
+        # FeedController.render_interval 이 '지금 보는 패널'의 이 값을
+        # 그대로 돌려준다(controller.py 참고).
+        self.render_interval = render_interval
 
     def _passes(self, obj) -> bool:
         """이 객체를 받을지 말지 판단한다.
@@ -688,9 +695,10 @@ class FeedHub:
         self.unknown: Counter = Counter()
 
     def subscribe(self, dtype: Type, agg: Aggregator,
-                  name: str | None = None, where=None) -> Panel:
+                  name: str | None = None, where=None,
+                  render_interval: float | None = None) -> Panel:
         """화면 하나를 등록한다. 등록 순서가 곧 숫자키 번호다."""
-        panel = Panel(dtype, agg, name or dtype.__name__, where)
+        panel = Panel(dtype, agg, name or dtype.__name__, where, render_interval)
 
         # routes 에 이 타입 칸이 없으면 빈 리스트를 만들고 거기 넣는다
         if dtype not in self.routes:

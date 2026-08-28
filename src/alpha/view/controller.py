@@ -41,6 +41,11 @@ from alpha.strategy.manual import MANUAL_STRATEGY_ID
 from alpha.trader.trading import OrderStatus
 from kis import kis_websocket
 
+# 전역 키 짧은 설명. app.py 의 Router.GLOBAL_KEYS 와 짝이 맞아야 한다.
+GLOBAL_KEY_HINTS = {
+    "h": "홈", "r": "시세", "o": "주문", "v": "구독", "b": "뒤로", "q": "종료",
+}
+
 
 class Controller:
     """모든 화면의 부모.
@@ -86,14 +91,29 @@ class Controller:
         return type(self).view(self.model, width)
 
     def hint(self) -> str:
-        """화면 맨 아래에 쓸 키 목록.  "  [j] [k] [h] [q]" 같은 것.
+        """화면 맨 아래에 쓸 키 목록.  "  [j:다음] [k:이전] [h:홈]" 같은 것.
 
-        전역 키와 같은 글자를 화면이 자기 keymap 에 넣어 가리는 경우
-        (예: 주문 화면의 'o') 목록에 중복으로 안 뜨게 거른다."""
-        globals_ = [k for k in ("h", "r", "o", "v", "b", "q")
-                   if k not in self.keymap]
-        keys = list(self.keymap) + globals_
-        return "  " + " ".join(f"[{k}]" for k in keys)
+        각 키의 설명은 그 핸들러의 docstring 첫 줄이다 — 핸들러를 추가할
+        때 짧은 한 줄 docstring만 붙이면 힌트가 저절로 따라온다. 전역 키와
+        같은 글자를 화면이 자기 keymap 에 넣어 가리는 경우(예: 주문 화면의
+        'o') 화면 쪽 설명이 우선하고 중복으로 안 뜬다."""
+        return self._render_hint(self.keymap)
+
+    def _render_hint(self, keys: dict) -> str:
+        """keys(보통 self.keymap)로 힌트 문자열을 만든다.
+
+        FeedController 처럼 keymap 일부(패널 번호 등)를 힌트에서 빼고
+        싶은 화면이 오버라이드해서 걸러낸 dict 를 넘길 수 있게 별도
+        메서드로 뺐다."""
+        parts = []
+        for k, fn in keys.items():
+            doc = (getattr(fn, "__doc__", None) or "").strip()
+            label = doc.splitlines()[0] if doc else None
+            parts.append(f"[{k}:{label}]" if label else f"[{k}]")
+        for k, label in GLOBAL_KEY_HINTS.items():
+            if k not in keys:
+                parts.append(f"[{k}:{label}]")
+        return "  " + " ".join(parts)
 
 
 class PagedKeys:
@@ -117,11 +137,21 @@ class PagedKeys:
 
     def __init__(self, m):
         super().__init__(m)
-        self.keymap.update({
-            "j": lambda app, arg: self.model.down(),   # 다음 페이지
-            "k": lambda app, arg: self.model.up(),     # 이전 페이지
-            "g": lambda app, arg: self.model.top(),    # 맨 위로
-        })
+        self.keymap.update({"j": self._down, "k": self._up, "g": self._top})
+
+    # 짧은 docstring이 힌트 줄(예: [j:다음])에 그대로 쓰인다 — 람다는
+    # __doc__ 이 없어서 이 목적으로는 이름 붙은 메서드가 필요하다.
+    def _down(self, app, arg):
+        """다음"""
+        self.model.down()
+
+    def _up(self, app, arg):
+        """이전"""
+        self.model.up()
+
+    def _top(self, app, arg):
+        """맨위"""
+        self.model.top()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -175,13 +205,17 @@ class RealDataController(PagedKeys, Controller):
         self.keymap.update({"f": self._filter, "d": self._detail})
 
     def _filter(self, app, arg):
-        """필터 (f 005930 / f 로 해제)"""
+        """필터
+
+        f 005930 / f 로 해제"""
         # arg 가 빈 문자열이면 None 을 넣어 필터를 끈다
         self.model.only = arg or None
         self.model.top()            # 필터가 바뀌면 맨 위로
 
     def _detail(self, app, arg):
-        """종목 상세 (d 005930)"""
+        """종목상세
+
+        d 005930"""
         if not arg:
             app.ctx.flash("사용법: d 005930")
             return
@@ -234,15 +268,17 @@ class OrderEntryController(Controller):
     """수동 주문 — 구독 종목 번호 목록을 보여주고, 콘솔 명령으로 broker 에
     직접 실제 주문을 넣는다.
 
-    ■ 'o' 가 두 가지 일을 한다
-        다른 화면에서 누르면(전역 키, Router.GLOBAL_KEYS) 이 화면으로
-        이동만 한다. 이 화면에서 인자를 붙여 누르면(로컬 keymap 이 전역
-        키를 가린다 — Controller.hint() 주석 참고) 그 인자를 주문
-        명령으로 해석해 실제로 주문을 낸다.
+    ■ 'o'는 화면 진입, 'ob'/'os'가 실제 주문이다
+        'o'(전역 키, Router.GLOBAL_KEYS)는 이 화면으로 이동만 한다.
+        매수/매도는 로컬 키맵의 'ob'/'os'로 낸다 — 방향을 -d 플래그로
+        따로 받지 않고 키 자체가 방향이다. 나머지 플래그(-s/-q/-p)는
+        순서에 상관없이 아무렇게나 섞어 써도 된다(_parse_flags 가
+        "-플래그 값" 쌍으로 걷어내지, 위치로 읽지 않는다).
 
-            o                              화면 진입/새로고침 (주문 아님)
-            o -s 1 -q 10 -d buy            1번 종목 10주 시장가 매수
-            o -s 005930 -q 10 -d sell -p 70000   구독 안 한 종목도 지정가로
+            o                              화면 진입/새로고침
+            ob -s 1 -q 10                  1번 종목 10주 매수(시장가)
+            os -s 005930 -q 10 -p 70000    구독 안 한 종목도 지정가 매도
+            ob -q 10 -s 1 -p 70000         순서를 바꿔도 동일하게 해석됨
 
     ■ -s 가 번호인지 종목코드인지
         국내 종목코드는 항상 6자리라, 6자리가 아닌 숫자만 번호(목록의
@@ -256,23 +292,35 @@ class OrderEntryController(Controller):
 
     name, title = "orders", "수동 주문"
     view = staticmethod(view.order_entry)
-    # 명령이 길다(-s -q -d -p) — 기본 1초 주기로 화면이 지워지면 타이핑
+    # 명령이 길다(-s -q -p) — 기본 1초 주기로 화면이 지워지면 타이핑
     # 도중에 지워진다. 다 쓸 때까지 여유를 주고, 결과 확인 후 반응은
     # nudge()가 여전히 즉시 처리한다.
     render_interval = 60.0
 
     def __init__(self, ctx):
         super().__init__(model.OrderEntry(ctx))
-        self.keymap["o"] = self._submit
+        self.keymap["ob"] = self._buy
+        self.keymap["os"] = self._sell
 
-    def _submit(self, app, arg):
-        """주문 (-s 번호|종목코드 -q 수량 -d buy|sell [-p 가격], p 생략 시 시장가)"""
+    # 짧은 docstring이 힌트 줄(예: [ob:매수])에 그대로 쓰인다 — 람다는
+    # __doc__ 이 없어서 이 목적으로는 이름 붙은 메서드가 필요하다.
+    # 실제 처리는 둘 다 _submit() 으로 모은다.
+    def _buy(self, app, arg):
+        """매수"""
+        self._submit(app, arg, "buy")
+
+    def _sell(self, app, arg):
+        """매도"""
+        self._submit(app, arg, "sell")
+
+    def _submit(self, app, arg, side: str):
+        """ob|os -s 번호|종목코드 -q 수량 [-p 가격], p 생략 시 시장가"""
         if not arg:
-            app.ctx.flash("사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]")
+            app.ctx.flash("사용법: ob|os -s 번호|종목코드 -q 수량 [-p 가격]")
             return
 
         try:
-            symbol, side, qty, price = self._parse_order(arg)
+            symbol, qty, price = self._parse_order(arg)
         except ValueError as e:
             app.ctx.flash(str(e))
             return
@@ -306,22 +354,18 @@ class OrderEntryController(Controller):
         app.submit(f"{symbol} {side} 주문", place, done)
 
     # ── 명령 해석 ────────────────────────────────────────────
-    def _parse_order(self, arg: str) -> tuple[str, str, float, "float | None"]:
+    def _parse_order(self, arg: str) -> tuple[str, float, "float | None"]:
         opts = _parse_flags(arg)
 
         raw_symbol = opts.get("s")
         if not raw_symbol:
-            raise ValueError("사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]")
+            raise ValueError("사용법: ob|os -s 번호|종목코드 -q 수량 [-p 가격]")
         symbol = self._resolve_symbol(raw_symbol)
         if symbol is None:
             raise ValueError(f"{raw_symbol}: 해당 번호의 종목이 없습니다.")
 
-        side = (opts.get("d") or "").lower()
-        if side not in ("buy", "sell"):
-            raise ValueError("-d buy 또는 -d sell 이 필요합니다.")
-
         try:
-            qty = float(opts["q"])
+            qty = int(opts["q"])
         except (KeyError, ValueError):
             raise ValueError("-q 수량(숫자)이 필요합니다.")
         if qty <= 0:
@@ -334,7 +378,7 @@ class OrderEntryController(Controller):
             except ValueError:
                 raise ValueError("-p 가격이 숫자가 아닙니다.")
 
-        return symbol, side, qty, price
+        return symbol, qty, price
 
     def _resolve_symbol(self, s: str) -> str | None:
         """번호(목록 인덱스, 1부터) 또는 종목코드 그대로.
@@ -381,11 +425,82 @@ class FeedController(PagedKeys, Controller):
     name, title = "feed", "구독 화면"
     view = staticmethod(view.feed)
 
+    @property
+    def render_interval(self) -> float | None:
+        """지금 보고 있는 패널이 정한 주기를 그대로 쓴다.
+
+        ★ 이 화면 전체를 한 값으로 고정하면 안 된다 ★
+          FeedController 하나가 시세판/호가/봉/포지션/주문 등 서로 다른
+          성격의 패널을 전부 담고 있다. 'oc 주문id' 타이핑 중에 화면이
+          지워지지 않아야 하는 건 주문 패널뿐인데, 예전엔 여기를 60.0
+          으로 고정해서 다른 실시간 패널(시세판 등)의 자동 갱신까지
+          전부 60초로 같이 느려졌었다.
+
+          이제 패널마다 add_view(..., render_interval=...)로 원하는 값을
+          주면(Panel.render_interval) 그 패널을 보는 동안만 그 주기를
+          쓰고, 안 준 패널은 None 이라 Runtime 기본값(1초)이 그대로
+          적용된다. 패널 전환·oc 처리 직후 반응은 nudge()가 항상 즉시
+          처리하므로, 느려지는 건 '아무 키도 안 눌렀을 때의 대기 화면
+          자동 새로고침'뿐이다 — 주문 패널을 60초로 줘도 안전한 이유."""
+        panel = self.model.panel
+        return panel.render_interval if panel is not None else None
+
     def __init__(self, ctx):
         super().__init__(model.Feed(ctx))
-        for number in range(1, 10):
+        for number in range(1, 20):
             # str(1) → "1" 키에, 패널 번호 0 을 고르는 함수를 붙인다.
             self.keymap[str(number)] = self._make_selector(number - 1)
+        self.keymap["oc"] = self._cancel_order
+
+    def _cancel_order(self, app, arg):
+        """주문취소
+
+        oc 주문id (예: oc o000005). 어느 패널을 보고 있는지와 무관하게
+        동작한다 — id 하나로 이미 어떤 주문인지 정해지므로 '주문' 패널을
+        먼저 골라야 할 이유가 없다."""
+        order_id = arg.strip()
+        if not order_id:
+            app.ctx.flash("사용법: oc 주문id (예: oc o000005)")
+            return
+
+        engine = app.ctx.engine
+        if engine is None:
+            app.ctx.flash("엔진이 연결되지 않았습니다.")
+            return
+
+        # PortfolioBroker.owner_of() 로 이 주문을 낸 전략을 찾고,
+        # 그 전략의 StrategyBroker(_orders)에서 실제 Order 객체를 꺼낸다 —
+        # 수동 주문이든 자동 전략 주문이든 같은 방식으로 찾아진다.
+        sid = engine.portfolio.owner_of(order_id)
+        slot = engine.slots.get(sid) if sid else None
+        order = slot.view._orders.get(order_id) if slot else None
+        if order is None:
+            app.ctx.flash(f"{order_id}: 주문을 찾을 수 없습니다.")
+            return
+        if order.is_done:
+            app.ctx.flash(f"{order_id}: 이미 종료된 주문입니다 ({order.status.value}).")
+            return
+
+        broker = slot.view
+
+        def cancel_it():
+            """워커 스레드에서 실행된다. 실전이면 여기서 REST 취소 요청이
+            나간다(KISBroker.cancel) — 입력 스레드에서 직접 부르면 안 된다."""
+            broker.cancel(order)
+            return order
+
+        def done(order):
+            """렌더 스레드에서 실행된다.
+
+            취소 '확정'은 나중에 체결통보로 온다(Engine.feed_execution →
+            feed_order 가 그때 CANCELED 로 갱신된 order 를 다시 흘린다).
+            여기서는 방금 요청을 보냈다는 것만 즉시 반영한다 — 안 넣으면
+            (SimBroker 는 즉시 CANCELED 로 바뀌는데도) 확정 통보가 없는
+            실전 경로처럼 화면에 아무 변화가 없어 보인다."""
+            app.view_q.put(order)
+            app.ctx.flash(f"{order_id} 취소 요청 (현재상태: {order.status.value})")
+
+        app.submit(f"{order_id} 취소", cancel_it, done)
 
     def _make_selector(self, index: int):
         """index 번 패널을 고르는 함수를 만들어 돌려준다.
@@ -412,6 +527,13 @@ class FeedController(PagedKeys, Controller):
             self.title = "구독 화면"
         else:
             self.title = f"구독 화면 · {panel.name}"
+
+    def hint(self) -> str:
+        """패널 번호(1~19)는 화면 위 menu() 에 이미 다 나와 있다("[1]시세판*
+        [2]호가 ..." 처럼) — 아래 힌트 줄에 또 줄줄이 늘어놓으면 중복이고
+        한 줄만 길어진다. 번호 키만 빼고 나머지(oc, 전역 키)는 그대로 보여준다."""
+        keys = {k: fn for k, fn in self.keymap.items() if not k.isdigit()}
+        return self._render_hint(keys)
 
 
 def build_controllers(ctx) -> list[Controller]:

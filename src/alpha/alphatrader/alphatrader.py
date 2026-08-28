@@ -127,18 +127,26 @@ class AlphaTrader:
 
     # ── 콘솔 뷰 구독 등록 ────────────────────────────────────────
     def add_view(self, dtype: type, agg: Aggregator, name: Optional[str] = None,
-                 where=None) -> "AlphaTrader":
+                 where=None, render_interval: Optional[float] = None) -> "AlphaTrader":
         """콘솔 뷰(구독 화면)에 패널 하나를 등록한다. 등록 순서가 곧
         숫자키(1,2,3...)다 — add_strategy() 와 나란히 build_trader() 자리에서
         부르면 된다. 실제 app.subscribe() 호출은 run_live/run_sim 이
-        Application 을 만드는 시점에 이 목록을 그대로 재생한다."""
-        self._view_specs.append(dict(dtype=dtype, agg=agg, name=name, where=where))
+        Application 을 만드는 시점에 이 목록을 그대로 재생한다.
+
+        render_interval: 이 패널을 보는 동안 자동 새로고침 주기(초).
+            안 주면 기본 1초로 그려진다. 명령을 길게 타이핑하는 패널
+            (예: 'oc 주문id'로 취소하는 주문 패널)만 늘려서 준다 — 그래야
+            타이핑 도중 화면이 안 지워진다. 나머지 패널은 손 안 대도
+            1초 그대로다(FeedController.render_interval 참고)."""
+        self._view_specs.append(dict(dtype=dtype, agg=agg, name=name, where=where,
+                                     render_interval=render_interval))
         log.info("뷰 구독 등록: %s (%s)", name or dtype.__name__, type(agg).__name__)
         return self
 
     def _apply_view(self, app: Application) -> Application:
         for spec in self._view_specs:
-            app.subscribe(spec["dtype"], spec["agg"], name=spec["name"], where=spec["where"])
+            app.subscribe(spec["dtype"], spec["agg"], name=spec["name"], where=spec["where"],
+                          render_interval=spec["render_interval"])
         return app
 
     def _build_engine(self, broker, dry_run: bool, view_q=None) -> Engine:

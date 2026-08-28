@@ -342,10 +342,13 @@ class Engine:
                 self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다. view_q/recorder도 여기서 같이 탄다
 
     def feed_timer(self, now: datetime):
-        """주기 호출(1초 등). 두 가지를 한다.
+        """주기 호출(1초 등). 세 가지를 한다.
             ① 틱이 끊긴 봉 강제 마감 — feed()를 거치지 않으므로 recorder/view_q를
                직접 챙긴다(브로커의 on_market은 원래도 이 경로에서 안 불렀다)
-            ② 전략의 on_timer — 종가청산, 미체결 정정 등 시각 기반 로직"""
+            ② 전략의 on_timer — 종가청산, 미체결 정정 등 시각 기반 로직
+            ③ 포지션판 갱신 — last_price 가 실시간이므로 체결 사이에도
+               가격이 움직이면 갱신해야 한다(체결 시점에만 흘리면 그
+               사이 가격변동이 화면에 하나도 안 보인다)"""
         for bar in self.bars.flush(now):
             if self.recorder is not None:
                 self.recorder.put(bar)
@@ -354,6 +357,7 @@ class Engine:
             self.router.dispatch(bar)
         for slot in self.slots.values():
             slot.trader.feed_timer(now)
+        self._push_positions()
 
     def feed_fill(self, fill: Fill):
         """체결. 주인 전략을 찾아 넘기기만 한다.
@@ -369,13 +373,45 @@ class Engine:
             self.recorder.put(fill)
         if self.view_q is not None:
             self.view_q.put(fill)
-            # 포지션은 기록하지 않고 뷰로만 흘린다. 이 체결로 바뀐 건
-            # sid 하나의 포지션뿐이지만, 전략마다 따로 추적하는 대신
-            # 매 체결마다 전체 포지션판을 다시 흘리는 쪽이 더 단순하다
-            # (Board 뷰는 symbol 별로 마지막 값만 덮어쓰므로 중복 push가 문제되지 않는다).
-            for v in self.portfolio._views.values():
-                for pos in v._pos.values():
-                    self.view_q.put(pos)
+            # ★ 이 체결로 완전청산됐으면 _push_positions() 만으론 부족하다 ★
+            #   StrategyBroker.apply_fill() 은 완전청산(size→0)이면 그 심볼을
+            #   v._pos 에서 아예 pop 해버린다(portfolio_broker.py). 그런데
+            #   _push_positions() 는 'v._pos 에 지금 있는 심볼'만 훑으므로,
+            #   방금 지워진 그 심볼은 순회에서 빠져 '0이 됐다'는 갱신 자체가
+            #   전혀 안 나간다 — 포지션판이 마지막 보유 수량에 영원히
+            #   멈춰버리는 버그가 이거였다. v.position(symbol) 은 _pos 에
+            #   없는 심볼도 size=0 인 Position 을 만들어주므로, 이 fill의
+            #   심볼만은 _pos 존재 여부와 무관하게 항상 명시적으로 민다.
+            v = self.portfolio._views.get(sid)
+            if v is not None:
+                self.view_q.put(v.position(fill.symbol))
+        self._push_positions()
+
+    def _push_positions(self):
+        """전 전략의 '지금 보유 중인' 포지션을 view_q 로 흘린다(feed_timer 주기
+        갱신용). 기록은 안 하고 뷰로만 흘린다.
+
+        ★ v._pos 를 그대로 넘기면 안 된다 ★
+          v._pos 는 StrategyBroker 의 원가 장부(size/avg_price)일 뿐이다.
+          apply_fill() 이 거길 last_price 는 절대 안 건드리므로, 그대로
+          넘기면 기본값 0.0 이 영원히 고정된다 — 포지션판 last_price 가
+          항상 0으로 뜨던 버그가 이거였다. v.position(symbol) 을 거쳐야
+          실브로커(SimBroker/KISBroker)가 매 시세마다 갱신해온 진짜
+          last_price 가 merge 된다.
+
+        ★ 완전청산된 심볼은 여기서 못 잡는다 ★
+          v._pos 에 지금 남아있는 심볼만 훑으므로, 방금 청산돼서 pop된
+          심볼은 대상이 아니다. 그건 feed_fill() 이 그 fill의 심볼만
+          별도로 명시적으로 민다 — 위 주석 참고.
+
+        전략별로 바뀐 것만 골라 보내는 대신 전체를 다시 흘리는 이유는
+        feed_fill 원래 주석과 같다 — Board 뷰는 symbol별 마지막 값만
+        덮어쓰므로 중복 push가 문제되지 않는다."""
+        if self.view_q is None:
+            return
+        for v in self.portfolio._views.values():
+            for symbol in v._pos:
+                self.view_q.put(v.position(symbol))
 
     def feed_order(self, order: Order):
         """주문 상태 변화. 그 주문을 낸 전략에만 알린다."""

@@ -64,8 +64,14 @@ class Router:
         return self.current.keymap.get(key) or self.GLOBAL_KEYS.get(key)
 
     def help_text(self) -> str:
-        parts = [f"{k}:{(fn.__doc__ or '').strip() or '?'}"
-                 for k, fn in self.current.keymap.items()]
+        """docstring 첫 줄만 쓴다 — 핸들러들이 자세한 사용법을 둘째 줄
+        아래에 적어두는 경우(hint() 를 짧게 유지하려고)가 있어서, 전체를
+        그대로 이으면 줄바꿈이 낀 채로 한 줄에 뭉개져 나온다."""
+        def label(fn) -> str:
+            doc = (fn.__doc__ or "").strip()
+            return doc.splitlines()[0] if doc else "?"
+
+        parts = [f"{k}:{label(fn)}" for k, fn in self.current.keymap.items()]
         parts += ["h:홈", "r:시세", "o:주문", "v:구독", "b:뒤로", "q:종료"]
         return " ".join(parts)
 
@@ -253,14 +259,18 @@ class Application:
         self._thread: threading.Thread | None = None
 
     # ── 구독 (Recorder.subscribe 와 같은 자리) ──
-    def subscribe(self, dtype, agg, name=None, where=None):
+    def subscribe(self, dtype, agg, name=None, where=None, render_interval=None):
         """화면 하나를 늘린다. 등록 순서가 곧 숫자키다.
 
             app.subscribe(Tick, kis_model.Board(cols=["price"]), name="시세판")
             app.subscribe(Tick, kis_model.Recent(20), name="삼성",
                           where={"symbol": "005930"})
-        """
-        return self.ctx.feed.subscribe(dtype, agg, name=name, where=where)
+
+        render_interval: 이 패널을 보는 동안 화면 자동 새로고침 주기(초).
+            안 주면 기본 1초. 명령을 길게 타이핑하는 패널(주문 취소 등)만
+            늘려서 준다 — FeedController.render_interval 참고."""
+        return self.ctx.feed.subscribe(dtype, agg, name=name, where=where,
+                                       render_interval=render_interval)
 
     # ── 기동 ──
     def run(self, block: bool = False) -> None:

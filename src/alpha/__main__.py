@@ -45,7 +45,7 @@ from alpha.recording.sinks import SqliteSink
 from alpha.strategy.indicator_watcher import IndicatorWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
-from alpha.trader.trading import IndicatorSnapshot, Fill, Trade, Order, Position
+from alpha.trader.trading import AccountSnapshot, IndicatorSnapshot, Fill, Trade, Order, Position
 from alpha.view import model
 
 log = logging.getLogger("main")
@@ -162,32 +162,28 @@ def build_trader(simul_mode: bool) -> AlphaTrader:
     trader.add_recording(events.Notice, alpha_sink, name="notice")
 
     # ── 콘솔 뷰 구독 — 등록 순서가 곧 'v' 화면의 숫자키(1,2,3...) ──
-    trader.add_view(Fill, model.Recent(100000, cols=[
-        "dt", "symbol", "side", "size", "price", "order_id", "commission"]), name="체결(fill)")
-    trader.add_view(Trade, model.Recent(100000, cols=[
-        "strategy_id", "symbol", "size", "entry_dt", "entry_price",
-        "exit_dt", "exit_price", "gross_pnl", "commission"]), name="거래(trade)")
-    trader.add_view(events.Notice, model.Recent(100000, cols=[
-        "dt", "symbol", "order_no", "filled_qty", "price", "rejected"]),
-        name="체결통보")
-    trader.add_view(events.Tick, model.Board(cols=["price", "volume"]),
-                    name="시세판")
+    trader.add_view(events.Tick, model.Board(cols=["dt", "price", "volume"]), name="시세판")
     trader.add_view(events.Quote, model.Latest(), name="호가")
-    trader.add_view(events.Bar, model.Recent(20, cols=[
-        "symbol", "open", "high", "low", "close", "volume"]), name="봉")
+    trader.add_view(events.Notice, model.Recent(100000, cols=["dt", "symbol", "order_no", "filled_qty", "price", "rejected"]), name="체결통보")
+
+    trader.add_view(events.Bar, model.Recent(20, cols=["dt", "symbol", "open", "high", "low", "close", "volume"]), name="봉")
     trader.add_view(IndicatorSnapshot, model.Pivot(), name="지표")
 
-    # Position/Order — 기록은 안 하고 뷰로만 흘린다(Engine.feed_fill/feed_order
-    # 참고). Board(by=...)는 같은 키가 오면 그 줄만 덮어쓰므로, 포지션은
-    # symbol별 최신 상태판이, 주문은 id별로 살아있는 것과 끝난 것이 한 판에서
-    # 각자 최신 상태로 보인다(주문이 FILLED/REJECTED 등으로 끝나도 그 줄은
-    # 안 사라지고 마지막 상태로 남는다 — '내역'으로 보기 좋다).
-    trader.add_view(Position, model.Board(by="symbol", cols=[
-        "size", "avg_price", "last_price"]), name="포지션")
-    trader.add_view(Order, model.Board(by="id", cols=[
-        "symbol", "side", "size", "filled_size", "price", "status"]), name="주문")
-    return trader
+    trader.add_view(Trade, model.Recent(100000, cols=["strategy_id", "symbol", "size", "entry_dt", "entry_price", "exit_dt", "exit_price", "gross_pnl", "commission"]), name="거래(trade)")
+    trader.add_view(Fill, model.Recent(100000, cols=["dt", "symbol", "side", "size", "price", "order_id", "commission"]), name="체결(fill)")
 
+    trader.add_view(Position, model.Board(by="symbol", cols=["size", "avg_price", "last_price"]), name="포지션")
+    # price 는 주문 낼 때 지정한 값이라 시장가 주문은 애초에 None이다.
+    # 실제로 체결된 가격은 avg_fill_price(Order.apply_fill()이 채움)에 있다 —
+    # 이걸 안 보여주면 시장가 체결이 화면에서 전부 "-"로만 보인다.
+    # render_interval=60 — 'oc 주문id'로 취소를 타이핑하는 동안 화면이
+    # 지워지면 안 되는 패널은 이거 하나뿐이다. 나머지 패널은 안 줘서
+    # 기본 1초 그대로 자동 갱신된다.
+    trader.add_view(Order, model.Board(by="id", cols=["symbol", "side", "size", "filled_size", "price", "avg_fill_price", "status", "created_at", "updated_at"]), name="주문", render_interval=60.0)
+    
+    # AccountSnapshot — cash/equity 는 Broker.@property 라 자체 이벤트가 없다. Trader.feed_timer(보통 1초 간격)가 찍어서 흘린다(trading.py 참고). 
+    trader.add_view(AccountSnapshot, model.Board(by="strategy_id", cols=["dt", "cash", "equity"]), name="계좌")
+    return trader
 
 def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
     """KiSEngine이 만드는 원본 틱/이벤트를 어디에 저장할지 등록한다.

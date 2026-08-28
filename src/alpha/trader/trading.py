@@ -826,6 +826,25 @@ class IndicatorSnapshot:
 
 
 @dataclass(frozen=True)
+class AccountSnapshot:
+    """전략(StrategyBroker) 하나의 현금·평가액 스냅샷.
+
+    ■ 왜 IndicatorSnapshot과 같은 이유로 필요한가
+        cash/equity 는 Broker.@property 라 스스로 이벤트를 만들지 않는다.
+        누군가 '지금' 읽어서 찍어줘야 기록·뷰에 남는다.
+
+    ■ 왜 feed_timer 에서 찍나 (특정 심볼 이벤트가 아니라)
+        equity 는 그 전략이 들고 있는 모든 종목의 평가액 합이다. 봉 마감
+        같은 특정 심볼 이벤트에 묶으면, 그 전략이 구독 안 한 종목의 가격이
+        움직여 equity 가 바뀌어도 못 찍는다. feed_timer(보통 1초 간격)는
+        심볼과 무관하게 전 전략을 고르게 훑으므로 이 문제가 없다."""
+    dt: datetime
+    strategy_id: str
+    cash: float
+    equity: float
+
+
+@dataclass(frozen=True)
 class _IndSlot:
     """지표 하나 + 그 지표를 무엇으로 갱신할지.
 
@@ -1279,9 +1298,23 @@ class Trader:
 
     def feed_timer(self, now: datetime):
         if self._started:
+            self._view_account(now)
             self._safe(self.strategy.on_timer, now)
 
     # ───────── 내부 ─────────
+    def _view_account(self, now: datetime):
+        """cash/equity 스냅샷을 recorder/view_q 에 흘린다.
+
+        _record_indicators 와 같은 이유(property는 스스로 이벤트를 못 만듦)
+        지만, 트리거는 특정 심볼 이벤트가 아니라 feed_timer 다 —
+        AccountSnapshot 클래스 docstring 참고."""
+        if self.recorder is None and self.view_q is None:
+            return
+        snap = AccountSnapshot(dt=now, strategy_id=self.strategy_id,
+                               cash=self.broker.cash, equity=self.broker.equity)
+        if self.view_q is not None:
+            self.view_q.put(snap)
+
     def _record_indicators(self, ev: MarketEvent):
         """이 이벤트로 갱신된 지표 값을 IndicatorSnapshot(long 포맷)으로
         recorder 에 남기고 view_q 에도 흘려 콘솔 뷰(Pivot 등 구독 화면)에서

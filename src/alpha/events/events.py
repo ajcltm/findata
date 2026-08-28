@@ -369,7 +369,17 @@ def from_notice(n, on: Optional[date] = None) -> Notice:
     ■ 모의(SimBroker)는 여기를 거치지 않는다
         SimBroker 는 자기 시계(self._now)를 이미 갖고 있어서, 체결
         판정 시점에 곧바로 Notice(정규화)를 만들어 큐에 넣는다 —
-        이 함수는 실전 웹소켓 원문(대문자 필드)만 정규화한다."""
+        이 함수는 실전 웹소켓 원문(대문자 필드)만 정규화한다.
+
+    ★ CNTG_YN 을 반드시 봐야 한다 ★
+        H0STCNI0 은 주문 하나에 최소 두 번 온다 — ① 거래소 접수
+        (CNTG_YN="1": 주문/정정/취소/거부 접수) ② 실제 체결
+        (CNTG_YN="2": 체결). 그런데 ①에서도 CNTG_QTY 에 주문수량이
+        그대로 채워져 오는 경우가 있어서, CNTG_YN 을 안 보고 CNTG_QTY 만
+        보면 '접수됐다'는 알림을 '전량 체결됐다'로 오인한다 — 지정가
+        주문을 내자마자 FILLED 로 뜨고 취소가 막히는 사고가 여기서 난다.
+        그래서 실제 체결(CNTG_YN=="2")일 때만 filled_qty 를 채운다."""
+    filled = n.CNTG_YN == "2"
     return Notice(
         kind="notice",
         symbol=n.STCK_SHRN_ISCD,
@@ -377,7 +387,7 @@ def from_notice(n, on: Optional[date] = None) -> Notice:
         raw=n,
         order_no=n.ODER_NO,
         rejected=(n.RFUS_YN == "Y"),
-        filled_qty=_f(n.CNTG_QTY),
+        filled_qty=_f(n.CNTG_QTY) if filled else 0.0,
         price=_f(n.CNTG_UNPR),
     )
 

@@ -2,6 +2,11 @@ import requests
 from kis import kis_config
 from datetime import datetime, timedelta
 
+import logging
+
+
+logger = logging.getLogger("kis")
+
 def create_hashkey(json_body=None):
     """
     [Hashkey] POST 주문/정정/취소 등에서 Request Body 변조 방지용 hashkey(HASH) 생성
@@ -412,12 +417,13 @@ def buy(code, qty, price='0'):
         "CANO": kis_config.CANO,
         "ACNT_PRDT_CD": kis_config.ACNT_PRDT_CD,
         "PDNO": code,  # 종목코드(6자리) , ETN의 경우 7자리 입력,
-        "ORD_DVSN": '01' if price == "0" else "00",  # [KRX] 00 : 지정가 / 01 : 시장가 
-        "ORD_QTY": qty,  # 주문수량,
-        "ORD_UNPR": price,  # 주문단가 (시장가 등 주문시 "0"),
+        "ORD_DVSN": '01' if price == 0 else "00",  # [KRX] 00 : 지정가 / 01 : 시장가 
+        "ORD_QTY": str(qty),  # 주문수량,
+        "ORD_UNPR": str(price) if price else "0",  # 주문단가 (시장가 등 주문시 "0"),
     }
-
+    logger.info(f"전문: {url} | {headers} | {params} | {data}")
     r = requests.post(url, headers=headers, params=params, json=data, timeout=10)
+    
     return r.json()
 
 def sell(code, qty, price='0'):
@@ -447,9 +453,9 @@ def sell(code, qty, price='0'):
         "CANO": kis_config.CANO,
         "ACNT_PRDT_CD": kis_config.ACNT_PRDT_CD,
         "PDNO": code,  # 종목코드(6자리) , ETN의 경우 7자리 입력,
-        "ORD_DVSN": '01' if price == "0" else "00",  # [KRX] 00 : 지정가 / 01 : 시장가 
-        "ORD_QTY": qty,  # 주문수량,
-        "ORD_UNPR": price,  # 주문단가 (시장가 등 주문시 "0"),
+        "ORD_DVSN": '01' if price == 0 else "00",  # [KRX] 00 : 지정가 / 01 : 시장가 
+        "ORD_QTY": str(qty),  # 주문수량,
+        "ORD_UNPR": str(price),  # 주문단가 (시장가 등 주문시 "0"),
     }
 
     r = requests.post(url, headers=headers, params=params, json=data, timeout=10)
@@ -493,15 +499,27 @@ def domestic_stock_order_modify(ORGN_ODNO, qty, price):
     r = requests.post(url, headers=headers, params=params, json=data, timeout=10)
     return r.json()
 
-def domestic_stock_order_cancel(ORGN_ODNO):
+def domestic_stock_order_cancel(krx_fwdg_ord_orgno: str, orgn_odno: str):
     """
-    [주식주문(정정취소)]
+    [주식주문(정정취소)] 중 취소 쪽.
     - METHOD: POST
     - URL: /uapi/domestic-stock/v1/trading/order-rvsecncl
     - TR_ID(실전): (정정) TTTC0013U (취소) TTTC0014U
     - TR_ID(모의): (정정) VTTC0013U (취소) VTTC0014U
     - API ID: v1_국내주식-003
-    """
+
+    ⚠ 예전 버전은 여기서 KRX_FWDG_ORD_ORGNO='06010' 을 하드코딩하고
+      ORD_QTY='1' 로 고정해서 냈다 — 잔량이 1주가 아니면 취소가 안 되거나
+      의도와 다르게 처리될 수 있었다. QTY_ALL_ORD_YN='Y'(잔량 전체 취소)로
+      바꿔서 정확한 수량을 몰라도 되게 했고, KRX_FWDG_ORD_ORGNO 는 호출자가
+      cancelable_orders() 로 조회해 온 값을 넘기게 했다(계좌·주문마다 다를
+      수 있어 하드코딩은 위험하다).
+
+    ⚠ tr_id 도 정정용(TTTC0013U)을 그대로 쓰고 있었다 — 취소는 TTTC0014U
+      다(위 docstring 표에도 그렇게 적혀 있었다). 여기서 바로잡았다.
+
+    ⚠ 실거래 반영 전 모의투자 계좌로 반드시 확인할 것 — KIS 응답
+      필드명·필수값은 문서로 재검증하지 못했다."""
 
     url = f"{kis_config.domain}/uapi/domestic-stock/v1/trading/order-rvsecncl"
 
@@ -510,7 +528,7 @@ def domestic_stock_order_cancel(ORGN_ODNO):
         "authorization": f"Bearer {kis_config.ACCESS_TOKEN}",
         "appkey": kis_config.APPKEY,
         "appsecret": kis_config.APPSECRET,
-        "tr_id": 'TTTC0013U',  
+        "tr_id": 'TTTC0014U',   # 취소. TTTC0013U 는 정정용이다(혼동 주의).
         "custtype": 'P'  # B:법인, P:개인,
     }
 
@@ -519,17 +537,36 @@ def domestic_stock_order_cancel(ORGN_ODNO):
     data = {
         "CANO": kis_config.CANO,
         "ACNT_PRDT_CD": kis_config.ACNT_PRDT_CD,
-        "KRX_FWDG_ORD_ORGNO": '06010',   # 한국거래소전송주문조직번호(=주문점)
-        "ORGN_ODNO": ORGN_ODNO,  # 원주문번호,
+        "KRX_FWDG_ORD_ORGNO": krx_fwdg_ord_orgno,  # 원주문 접수 시의 거래소전송주문조직번호
+        "ORGN_ODNO": orgn_odno,  # 원주문번호,
         "ORD_DVSN": '00',  # 주문구분 00 : 지정가 / 01 : 시장가
         "RVSE_CNCL_DVSN_CD": '02',  # 정정/취소구분코드, 01: 정정, 02: 취소
-        "ORD_QTY": '1',  # 정정수량(또는 취소수량),
-        "ORD_UNPR": '0',  # 정정단가(시장가 등은 0),
-        "QTY_ALL_ORD_YN" : 'N',  # 전량주문여부 Y/N
+        "ORD_QTY": '0',  # QTY_ALL_ORD_YN='Y' 라 무시된다(잔량 전체 취소),
+        "ORD_UNPR": '0',  # 취소는 가격 의미 없음,
+        "QTY_ALL_ORD_YN": 'Y',  # 전량(잔량) 취소 — 부분취소 수량을 몰라도 된다
     }
 
     r = requests.post(url, headers=headers, params=params, json=data, timeout=10)
     return r.json()
+
+
+def cancelable_orders() -> dict:
+    """[주식정정취소가능주문조회] 결과를 {주문번호(ODNO): {krx_fwdg_ord_orgno, ord_tmd}} 로 간추린다.
+
+    취소를 실제로 보내려면 원주문 접수 시의 KRX_FWDG_ORD_ORGNO 가 필요한데,
+    place_order()/buy()/sell() 응답에서 아직 안 뽑아 저장해두고 있어서
+    (그리고 프로세스를 재시작하면 로컬에 아예 없다), 취소 직전에 여기서
+    다시 조회해 원주문번호와 짝을 맞춘다. 이미 체결·취소된 주문은 이
+    목록에 안 잡힌다 — 호출자가 '취소 대상이 없다'로 처리하면 된다."""
+    r = domestic_stock_inquire_psbl_rvsecncl()
+    output = r.get("output") or []
+    return {
+        item.get("odno"): {
+            "krx_fwdg_ord_orgno": item.get("krx_fwdg_ord_orgno") or item.get("ord_gno_brno"),  # 일부 주문은 ord_gno_brno 필드에 들어있다
+            "ord_tmd": item.get("ord_tmd"),
+        }
+        for item in output
+    }
 
 def domestic_stock_inquire_psbl_rvsecncl():
     """

@@ -8,7 +8,9 @@
       "Bash(PYTHONIOENCODING=utf-8 python -c ' *)",
       "Bash(python -m py_compile src/alpha/events/events.py src/kis/kis_engine.py src/alpha/broker/sim_broker.py src/alpha/engine/live_runner.py)",
       "Bash(python -m py_compile src/alpha/__main__.py)",
-      "Bash(python -m py_compile src/alpha/view/controller.py)"
+      "Bash(python -m py_compile src/alpha/view/controller.py)",
+      "Bash(python -m py_compile src/kis/kis_api.py src/alpha/broker/kis_broker.py src/alpha/view/controller.py)",
+      "Bash(python -m py_compile src/alpha/view/controller.py src/alpha/view/view.py)"
     ]
   }
 }

@@ -65,12 +65,13 @@ class KISBroker(Broker):
     submit/cancel)만 채우면 buy/sell/close/target_pct 는 베이스가 만들어준다.
 
     REST 호출은 self.api 가 아니라 kis_api 모듈 함수를 직접 부른다
-    (kis_api.place_order, kis_api.balance 등) — submit()/sync_balance() 참고.
+    (kis_api.place_order, kis_api.balance, kis_api.cancelable_orders/
+    domestic_stock_order_cancel 등) — submit()/sync_balance()/cancel() 참고.
+    이 클래스는 api 객체를 주입받지 않는다(생성자가 인자를 안 받는다).
 
-    ⚠ cancel() 은 아직 self.api.cancel_order(...) 를 부르는데 self.api 가
-      이 클래스에 없다(생성자가 인자를 안 받는다) — 실제로 취소를 타면
-      AttributeError 로 실패한다. sync_balance() 와 같은 문제라
-      kis_api 쪽에 취소 함수가 생기면 여기도 같은 방식으로 고쳐야 한다."""
+    ⚠ 실거래 투입 전 확인할 것 — 모의투자 계좌로 주문·취소를 실제로 태워
+      KIS 응답의 정확한 필드명(ODNO vs ORD_NO 등, submit() 참고)과
+      RVSE_CNCL_DVSN_CD/QTY_ALL_ORD_YN 동작을 검증하지 못했다."""
 
     def __init__(self):
 
@@ -179,12 +180,33 @@ class KISBroker(Broker):
         # 락을 놓고 호출한다. 네트워크 I/O 는 수백 ms 가 걸릴 수 있는데
         # 그동안 락을 쥐고 있으면 소켓 스레드가 통째로 멈춘다.
         try:
-            broker_id = kis_api.place_order(
+            response = kis_api.place_order(
                 symbol=order.symbol,
                 side=order.side.value,                          # "buy" / "sell"
                 qty=int(order.size),                            # KIS는 정수 수량만
                 price=int(order.price) if order.price else 0,   # 0 = 시장가
             )
+
+            result = response.get("rt_cd")
+            # ⚠ 필드명 확인 필요: KIS의 다른 주문 관련 응답(정정취소,
+            # 정정취소가능조회)은 전부 "ODNO"를 쓴다(kis_api.py 의
+            # domestic_stock_order_cancel/cancelable_orders 참고).
+            # 취소 기능이 order.broker_id(=여기서 뽑은 값)로 원주문을
+            # 찾으므로, 응답에 "ORD_NO"가 없으면 broker_id 가 계속 "None"
+            # 문자열이 되어 취소·체결통보 매칭이 전부 깨진다. 모의투자로
+            # 실제 응답 바디를 한 번 찍어 어느 키가 맞는지 확인할 것.
+            output = response.get("output", {}) or {}
+            broker_id = output.get("ODNO") or output.get("ORD_NO")
+            log.info("주문 %s ", order)
+
+            if result != "0" :
+                # KIS는 주문이 거부돼도 HTTP 200을 준다. 그래서 여기서 거부를
+                # 감지해야 한다. (거부 사유는 response["msg1"]에 있다)
+                order.status = OrderStatus.REJECTED
+                order.reject_reason = response.get("msg1", "거부")
+                log.warning("주문 거부 %s %s", order.id, order.reject_reason)
+                return order
+        
         except Exception as e:
             # 네트워크 실패·인증 만료·거래소 거부 — 전부 여기로 온다.
             # 예외를 위로 던지지 않는 게 중요하다. 전략은 "거부됐다"만 알면 되고
@@ -216,14 +238,54 @@ class KISBroker(Broker):
     def cancel(self, order: Order) -> None:
         """미체결 주문 취소. 이미 끝난 주문이면 조용히 무시한다.
 
-        상태는 여기서 바꾸지 않는다. 취소 확인도 체결통보 웹소켓으로 오므로
-        on_execution_report(status="cancel") 에서 처리된다."""
+        ★ REST 취소 응답만으로 낙관적으로 CANCELED 를 세팅한다 ★
+          원래는 "상태는 여기서 안 바꾼다, 확정은 체결통보 웹소켓의
+          on_execution_report(status="cancel") 에서 한다"였다. 그런데
+          live_runner._handle_notice() 는 통보를 reject/fill 두 가지로만
+          나누고 cancel 은 만들지 않는다 — H0STCNI0 은 취소 접수도 같은
+          "1"(주문/정정/취소/거부 접수) 값으로 오는데, 그걸 신규주문
+          접수와 구분할 근거(RCTF_CLS 등)를 KIS 공식 문서로 확정할 수가
+          없어서, 실제로는 취소 확정이 영원히 안 와서 취소 요청만 뜨고
+          주문 상태가 그대로 남는 버그가 있었다.
+
+          submit() 이 REST 응답만으로 SUBMITTED 를 낙관적으로 세팅하는
+          것과 같은 패턴으로, 여기서도 거래소가 취소를 접수했다는 REST
+          응답(rt_cd=="0")만으로 CANCELED 를 세팅한다. 혹시 그 사이 실제로
+          체결됐다면, 뒤이어 오는 진짜 체결통보의 apply_fill() 이 현재
+          status 를 안 보고 무조건 FILLED/PARTIAL 로 덮어쓰므로 자동으로
+          바로잡힌다 — 완전히 안전하지는 않지만(체결과 취소 사이의 아주
+          짧은 경합), 지금까지처럼 취소가 영원히 안 먹히는 것보다 낫다.
+
+        ★ self.api가 아니라 kis_api 모듈 함수를 직접 부른다 ★
+          이 클래스는 api 객체를 주입받지 않는다(생성자가 인자를 안 받음).
+          예전 코드는 존재하지 않는 self.api.cancel_order(...)를 불러서
+          취소를 시도할 때마다 AttributeError로 조용히 실패하고 있었다.
+
+        ★ 취소 직전에 KRX_FWDG_ORD_ORGNO를 다시 조회하는 이유 ★
+          원주문 접수 응답에서 그 값을 안 받아 저장해두고 있고, 설령
+          저장해뒀어도 재시작하면 로컬엔 없다. kis_api.cancelable_orders()
+          (정정취소가능주문조회)가 지금 취소 가능한 주문들의 그 값을
+          다시 준다 — 동시에 '이미 체결/취소돼서 더 이상 취소할 수
+          없다'도 여기서 자연히 걸러진다."""
         if not order.broker_id or order.is_done:
             return
         try:
-            # 부분체결됐을 수 있으니 전체가 아니라 잔량(remaining)만 취소한다.
-            self.api.cancel_order(order.broker_id, order.symbol,
-                                  int(order.remaining))
+            cancelable = kis_api.cancelable_orders()
+            info = cancelable.get(order.broker_id)
+            if info is None:
+                log.warning("취소 가능 목록에 없음(이미 체결/취소됐을 수 있음): %s(%s)",
+                           order.id, order.broker_id)
+                return
+            r = kis_api.domestic_stock_order_cancel(
+                krx_fwdg_ord_orgno=info["krx_fwdg_ord_orgno"],
+                orgn_odno=order.broker_id)
+            if r.get("rt_cd") != "0":
+                log.warning("취소 실패 %s: %s", order.id, r.get("msg1"))
+            else:
+                log.info("취소 요청 전송 %s", order.id)
+                with self._lock:
+                    order.status = OrderStatus.CANCELED
+                    order.updated_at = datetime.now()
         except Exception:
             log.exception("취소 실패 %s", order.id)
 

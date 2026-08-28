@@ -121,11 +121,11 @@ def order_entry(m, width: int) -> list[str]:
             out.append(f"  [{i:>2}] {sym}")
     out += [
         "",
-        " 사용법: o -s 번호|종목코드 -q 수량 -d buy|sell [-p 가격]",
+        " 사용법: ob|os -s 번호|종목코드 -q 수량 [-p 가격]   (ob=매수, os=매도)",
         "        -p 생략 시 시장가. 종목코드를 직접 쓰면 구독 안 한",
-        "        종목도 주문할 수 있다.",
-        "        예) o -s 1 -q 10 -d buy",
-        "            o -s 005930 -q 10 -d sell -p 70000",
+        "        종목도 주문할 수 있다. 플래그 순서는 상관없다.",
+        "        예) ob -s 1 -q 10",
+        "            os -s 005930 -q 10 -p 70000",
     ]
     if m.last_result:
         out += ["", f" 마지막 결과: {m.last_result}"]
