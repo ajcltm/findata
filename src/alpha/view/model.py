@@ -802,14 +802,34 @@ class Home(ScreenModel):
 
     @property
     def subscribed(self) -> str:
-        """웹소켓 구독 종목 수. ws 가 없으면 '-'."""
+        """웹소켓 구독 현황 한 줄 요약. ws 가 없으면 '-'.
+
+        ws.subscription_status() 는 (tr_id, tr_key, 상태) 를 구독 하나당
+        한 줄씩 돌려준다 — 종목 하나가 가격(H0STCNT0)·호가(H0STASP0)로
+        각각 잡히니 종목 수의 배로 늘어나고, 그걸 str()로 그대로 찍으면
+        홈 화면 첫 줄이 종목이 늘어날수록 한없이 길어진다(체결통보
+        tr_key인 계좌번호까지 섞여서 더 알아보기 어려웠다). 여기서
+        건수로 요약한다 — 상세가 필요하면 ws.subscription_status() 를
+        직접 부를 것."""
         ws = self.ctx.ws
         if ws is None or not hasattr(ws, "subscription_status"):
             return "-"
         try:
-            return str(ws.subscription_status())
+            rows = ws.subscription_status()
         except Exception:
             return "?"
+        if not rows:
+            return "0건"
+
+        ok = sum(1 for _, _, status in rows if "SUCCESS" in str(status).upper())
+        # 종목(가격·호가) 구독만 센다 — 체결통보는 tr_key가 계좌번호라 "종목"이 아니다.
+        feed_tr_ids = {getattr(ws, "tr_price", None), getattr(ws, "tr_orderbook", None)}
+        symbols = {key for tr, key, _ in rows if tr in feed_tr_ids}
+
+        text = f"{len(symbols)}종목 · 구독 {len(rows)}건(성공 {ok}"
+        if ok < len(rows):
+            text += f", 대기/실패 {len(rows) - ok}"
+        return text + ")"
 
     def header(self) -> list[str]:
         return ["종류", "누적", "건/초", "최근수신"]

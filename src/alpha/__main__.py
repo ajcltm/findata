@@ -167,19 +167,29 @@ def build_trader(simul_mode: bool) -> AlphaTrader:
     trader.add_view(events.Notice, model.Recent(100000, cols=["dt", "symbol", "order_no", "filled_qty", "price", "rejected"]), name="체결통보")
 
     trader.add_view(events.Bar, model.Recent(20, cols=["dt", "symbol", "open", "high", "low", "close", "volume"]), name="봉")
-    trader.add_view(IndicatorSnapshot, model.Pivot(), name="지표")
+
+    # 단일 라인 지표(SMA/RSI/ATR/CrossOver 등)는 전부 라인 이름을 "value"로
+    # 통일해서 쓴다(indicators.py 관례) — 그래야 where={"line":"value"}
+    # 하나로 다중 라인 지표(MACD 등)와 자동으로 갈린다. 안 걸러내면 MACD의
+    # macd/signal/histo 가 label="MACD" 한 칸에서 서로 덮어써서 뒤섞인다.
+    trader.add_view(IndicatorSnapshot, model.Pivot(), name="지표", where={"line": "value"})
+    # MACD는 라인이 셋이라 일반 지표판과 축이 다르다(symbol×line) — 그래서
+    # 별도 화면으로 뺀다. label="MACD"는 IndicatorWatcher.setup()에서
+    # override로 고정해둔 값과 반드시 같아야 한다.
+    trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+                    name="MACD", where={"label": "MACD"})
 
     trader.add_view(Trade, model.Recent(100000, cols=["strategy_id", "symbol", "size", "entry_dt", "entry_price", "exit_dt", "exit_price", "gross_pnl", "commission"]), name="거래(trade)")
     trader.add_view(Fill, model.Recent(100000, cols=["dt", "symbol", "side", "size", "price", "order_id", "commission"]), name="체결(fill)")
 
-    trader.add_view(Position, model.Board(by="symbol", cols=["size", "avg_price", "last_price"]), name="포지션")
+    trader.add_view(Position, model.Board(by="symbol", cols=["strategy_id", "size", "avg_price", "last_price"]), name="포지션")
     # price 는 주문 낼 때 지정한 값이라 시장가 주문은 애초에 None이다.
     # 실제로 체결된 가격은 avg_fill_price(Order.apply_fill()이 채움)에 있다 —
     # 이걸 안 보여주면 시장가 체결이 화면에서 전부 "-"로만 보인다.
     # render_interval=60 — 'oc 주문id'로 취소를 타이핑하는 동안 화면이
     # 지워지면 안 되는 패널은 이거 하나뿐이다. 나머지 패널은 안 줘서
     # 기본 1초 그대로 자동 갱신된다.
-    trader.add_view(Order, model.Board(by="id", cols=["symbol", "side", "size", "filled_size", "price", "avg_fill_price", "status", "created_at", "updated_at"]), name="주문", render_interval=60.0)
+    trader.add_view(Order, model.Board(by="id", cols=["strategy_id", "symbol", "side", "size", "filled_size", "price", "avg_fill_price", "status", "created_at", "updated_at"]), name="주문", render_interval=60.0)
     
     # AccountSnapshot — cash/equity 는 Broker.@property 라 자체 이벤트가 없다. Trader.feed_timer(보통 1초 간격)가 찍어서 흘린다(trading.py 참고). 
     trader.add_view(AccountSnapshot, model.Board(by="strategy_id", cols=["dt", "cash", "equity"]), name="계좌")
@@ -269,7 +279,7 @@ def _load_dataframe(path: str | None):
 
 
 def run_backtest(path: str | None, plot: bool):
-    trader = build_trader()
+    trader = build_trader(simul_mode=False)   # 백테스트엔 kis_data_sim.db가 없다 — 이 인자는 alpha_data.db 파일명만 가른다
     df = _load_dataframe(path)
 
     result, eng = trader.run_backtest(df, symbol=SYMBOL, seconds=BAR_SECONDS, plot=plot)

@@ -13,12 +13,33 @@
     대가는 속도다 — 벡터 연산을 못 쓰니 긴 백테스트가 느려진다.
 
 ■ 공통 규약
-    update(ev) -> float | None       값이 없으면 None (워밍업 부족)
-    .value                           마지막 값
-    .ready                           값을 낼 수 있는 상태인가
+    update(ev) -> float | None       대표 라인 값. 없으면 None (워밍업 부족)
+    .values()                        지금까지 낸 라인 전부. {"macd": 1.2, ...}
+    .line(이름)                      라인 하나만 이름으로 꺼낸다
+    .value                           라인이 정확히 하나일 때만 그 값(편의)
+    .ready                           지금 낸 라인들 중 None 이 없는가
+
+■ 라인 — 지표 하나가 값을 여러 개 낼 수 있다
+    MACD(macd/signal/histo)처럼 값이 여럿인 지표는 update() 안에서
+    self._values["라인이름"] = 값 을 원하는 만큼 채우면 된다. 미리
+    선언할 필요가 없다 — "이 지표는 라인이 몇 개다"를 베이스 클래스에
+    알릴 필요가 없다는 뜻이다.
+
+    값을 하나만 내는(대부분의) 지표는 관례상 라인 이름을 "value" 하나만
+    쓴다 — 그러면 .value 로 바로 읽히고(라인이 정확히 하나면 자동으로
+    그걸 가리킨다), 일반 지표 화면(콘솔 뷰)에서 다중 라인 지표와
+    where={"line": "value"} 로 자동 구분된다.
+
+    ★ "주 라인"을 강제하지 않는다 ★
+      MACD 같은 지표를 만들 때 "이 중 어떤 라인이 대표냐"를 정할 필요가
+      없다 — 그냥 .line("macd")/.line("signal")/.line("histo") 로 셋 다
+      똑같이 읽는다. .value 는 라인이 하나뿐인 지표에서만 의미가 있고,
+      여러 개면 None 이다(어느 걸 골라야 할지 이 클래스가 판단할 근거가
+      없으므로 — 호출자가 .line(이름)으로 명시해야 한다).
 
 ■ 입력은 봉만이 아니다
-    update() 가 받는 건 Bar 일 수도 Tick 일 수도 Quote 일 수도 있다.
+    update() 가 받는 건 Bar 일 수도 Tick 일 수도 Quote 일 수도, 다른
+    지표의 원시 출력값(_Scalar 로 감싼 것)일 수도 있다.
     src 를 필드명으로 받는 지표(SMA/EMA)는 그대로 재사용된다:
         SMA(20, src="close")   봉의 종가
         SMA(20, src="price")   틱의 체결가
@@ -62,7 +83,6 @@ class Indicator:
 
             SMA(20, name="장기추세")  → "장기추세"
     """
-    _v: Optional[float] = None
     _name: Optional[str] = None
     _args: dict = {}
     _defaults: dict = {}
@@ -72,7 +92,12 @@ class Indicator:
 
         이 방식을 쓰는 이유: 하위 클래스가 super().__init__() 을 부르도록
         강제하면 언젠가 빼먹는다. __init_subclass__ 는 클래스 정의 시점에
-        한 번만 돌고 하위 클래스 코드를 건드리지 않는다."""
+        한 번만 돌고 하위 클래스 코드를 건드리지 않는다.
+
+        self._values 를 여기서 만드는 이유도 같다 — 라인 저장소는
+        인스턴스마다 따로 있어야 하는데(클래스 속성으로 두면 모든
+        인스턴스가 공유해 값이 섞인다), 하위 클래스 __init__ 이 전부
+        super().__init__() 을 부르진 않으므로 이 래퍼가 대신 만들어준다."""
         super().__init_subclass__(**kw)
 
         orig = cls.__init__
@@ -86,6 +111,7 @@ class Indicator:
 
         @functools.wraps(orig)
         def __init__(self, *args, name=None, **kwargs):
+            self._values: dict[str, Optional[float]] = {}   # 라인이름 -> 값
             orig(self, *args, **kwargs)
             self._name = name
             bound = sig.bind(self, *args, **kwargs)
@@ -129,24 +155,53 @@ class Indicator:
         """값을 내기까지 필요한 이벤트 개수. 모르면 None.
 
         기본값은 period 인자다. 다르게 필요하면 하위 클래스가 오버라이드한다
-        (RSI 는 첫 봉에서 변화량을 못 구해 period+1, CrossOver 는 입력 기준).
-
-        전략이 required_history() 로 이걸 모아 '무엇을 몇 개 받아와야
-        하는지'를 알려준다. 200일선을 쓰면서 100봉만 받아오면
-        장 시작 후 100봉을 더 기다려야 한다."""
+        (RSI 는 첫 봉에서 변화량을 못 구해 period+1, CrossOver/MACD 는
+        입력 기준)."""
         return self._args.get("period")
+
+    # ───────── 라인 접근 ─────────
+    def line(self, name: str) -> Optional[float]:
+        """라인 하나를 이름으로 꺼낸다. 단일 라인 지표에도 그대로 동작한다
+        (sma.line("value") == sma.value)."""
+        return self._values.get(name)
+
+    def values(self) -> dict[str, Optional[float]]:
+        """지금까지 낸 라인 전부의 사본. {"macd": 1.2, "signal": 1.0, ...}
+        indicator_snapshot()/기록/뷰가 이걸로 라인을 전부 훑는다."""
+        return dict(self._values)
 
     @property
     def value(self) -> Optional[float]:
-        return self._v
+        """라인이 정확히 하나일 때만 그 값을 돌려준다(단일 라인 지표용
+        편의). 라인이 여럿이면 어느 걸 대표로 삼을지 이 클래스가 정할
+        근거가 없으므로 None — .line("이름")으로 명시해서 읽을 것."""
+        if len(self._values) == 1:
+            return next(iter(self._values.values()))
+        return None
 
     @property
     def ready(self) -> bool:
-        """값이 나오기 시작했나. Strategy.ready 가 이걸 모아서 본다."""
-        return self._v is not None
+        """값을 하나라도 냈고, 지금 낸 라인들 중 None 이 없으면 준비된
+        것으로 본다. 사정이 다른 지표(예: CrossOver — 0도 정상값이라
+        None 여부로 못 가른다)는 오버라이드한다."""
+        return bool(self._values) and all(v is not None for v in self._values.values())
 
     def update(self, ev) -> Optional[float]:
         raise NotImplementedError
+
+
+class _Scalar:
+    """다른 지표의 출력(원시 숫자)을, 'bar.close'처럼 필드로 값을 읽는
+    지표(SMA/EMA 등)에 그대로 먹이기 위한 최소 래퍼.
+
+    예) MACD의 signal 선은 '봉'이 아니라 'macd 값'의 EMA다:
+        self.signal_ema = EMA(9, src="v")
+        self.signal_ema.update(_Scalar(macd_value))
+    """
+    __slots__ = ("v",)
+
+    def __init__(self, v: float):
+        self.v = v
 
 
 class SMA(Indicator):
@@ -175,8 +230,9 @@ class SMA(Indicator):
         self._sum += x
 
         # N개가 다 차기 전에는 평균이 의미 없으므로 None.
-        self._v = self._sum / self.period if len(self.buf) == self.period else None
-        return self._v
+        value = self._sum / self.period if len(self.buf) == self.period else None
+        self._values["value"] = value
+        return value
 
 
 class EMA(Indicator):
@@ -199,16 +255,19 @@ class EMA(Indicator):
 
     def update(self, bar):
         x = getattr(bar, self.src)
+        cur = self._values.get("value")
 
-        if self._v is None:
+        if cur is None:
             # ── 시드 단계 ── N개 모아서 단순평균
             self.buf.append(x)
             if len(self.buf) == self.period:
-                self._v = sum(self.buf) / self.period
+                cur = sum(self.buf) / self.period
         else:
             # ── 정상 단계 ── 이전값과 섞는다
-            self._v = x * self.k + self._v * (1 - self.k)
-        return self._v
+            cur = x * self.k + cur * (1 - self.k)
+
+        self._values["value"] = cur
+        return cur
 
 
 class RSI(Indicator):
@@ -265,11 +324,12 @@ class RSI(Indicator):
             return None
 
         if self.avg_loss == 0:
-            self._v = 100.0                     # 하락이 전혀 없었다
+            value = 100.0                        # 하락이 전혀 없었다
         else:
             rs = self.avg_gain / self.avg_loss
-            self._v = 100.0 - 100.0 / (1.0 + rs)
-        return self._v
+            value = 100.0 - 100.0 / (1.0 + rs)
+        self._values["value"] = value
+        return value
 
 
 class ATR(Indicator):
@@ -305,14 +365,17 @@ class ATR(Indicator):
                      abs(bar.low - self.prev_close))
         self.prev_close = bar.close
 
-        if self._v is None:
+        cur = self._values.get("value")
+        if cur is None:
             self.buf.append(tr)
             if len(self.buf) == self.period:
-                self._v = sum(self.buf) / self.period
+                cur = sum(self.buf) / self.period
         else:
             n = self.period
-            self._v = (self._v * (n - 1) + tr) / n
-        return self._v
+            cur = (cur * (n - 1) + tr) / n
+
+        self._values["value"] = cur
+        return cur
 
 
 class CrossOver(Indicator):
@@ -322,6 +385,13 @@ class CrossOver(Indicator):
         차이(a - b)의 '부호가 바뀌는 순간'을 잡는다.
             이전 차이 ≤ 0 인데 지금 > 0  → a 가 b 를 뚫고 올라감 → +1
             이전 차이 ≥ 0 인데 지금 < 0  → 뚫고 내려감           → -1
+
+    ■ a.value / b.value 를 쓰는 이유
+        a, b 는 아무 지표나 받는다(보통 SMA 둘). 라인이 하나뿐인
+        지표라면 .value 가 자동으로 그 값을 가리키므로 이름을 몰라도
+        된다 — a, b 가 라인을 여러 개 내는 지표(MACD 등)면 .value 가
+        None 이 되므로 쓸 수 없다(그럴 땐 a.line("macd") 처럼 직접
+        지표를 감싸서 넘길 것).
 
     ■ ★ 등록 순서 주의 ★
         입력 지표(a, b)가 먼저 update 된 뒤에 이 지표가 update 돼야 한다.
@@ -334,8 +404,8 @@ class CrossOver(Indicator):
 
     def __init__(self, a: Indicator, b: Indicator):
         self.a, self.b = a, b
-        self.prev_diff = None       # 직전 봉의 (a - b)
-        self._v = 0.0               # 교차 없음이 기본값
+        self.prev_diff = None                   # 직전 봉의 (a - b)
+        self._values["value"] = 0.0             # 교차 없음이 기본값
 
     @property
     def warmup(self) -> Optional[int]:
@@ -347,14 +417,14 @@ class CrossOver(Indicator):
 
     @property
     def ready(self):
-        """다른 지표와 달리 값이 0이어도 정상이므로 _v 로 판정할 수 없다.
-        '직전 차이를 알고 있는가'로 본다."""
+        """다른 지표와 달리 값이 0이어도 정상이므로 베이스의 기본 ready
+        (None 여부)로 판정할 수 없다. '직전 차이를 알고 있는가'로 본다."""
         return self.prev_diff is not None
 
     def update(self, bar=None):
         # 입력 지표가 아직 워밍업 중이면 판단 보류
         if not (self.a.ready and self.b.ready):
-            self._v = 0.0
+            self._values["value"] = 0.0
             return 0.0
 
         cur = self.a.value - self.b.value
@@ -362,18 +432,73 @@ class CrossOver(Indicator):
         # 첫 계산이면 비교 대상이 없다. 차이만 기록하고 넘어간다.
         if self.prev_diff is None:
             self.prev_diff = cur
-            self._v = 0.0
+            self._values["value"] = 0.0
             return 0.0
 
         if self.prev_diff <= 0 < cur:
-            self._v = 1.0           # 음(또는 0) → 양 : 상향돌파
+            value = 1.0                          # 음(또는 0) → 양 : 상향돌파
         elif self.prev_diff >= 0 > cur:
-            self._v = -1.0          # 양(또는 0) → 음 : 하향돌파
+            value = -1.0                         # 양(또는 0) → 음 : 하향돌파
         else:
-            self._v = 0.0           # 부호 그대로
+            value = 0.0                          # 부호 그대로
 
         self.prev_diff = cur
-        return self._v
+        self._values["value"] = value
+        return value
+
+
+class MACD(Indicator):
+    """이동평균수렴확산(Moving Average Convergence Divergence).
+
+    ■ 세 라인 — 셋 다 대등하다(대표 라인 없음)
+        macd    단기EMA - 장기EMA. 0선 위면 상승추세, 아래면 하락추세.
+        signal  macd 의 EMA. macd 가 이 선을 위/아래로 뚫는 순간이 흔히
+                쓰는 매매 신호다.
+        histo   macd - signal. 0 근처에서 부호가 바뀌는 순간이 signal
+                교차와 같은 타이밍이라, 막대그래프로 보통 표현한다.
+
+    ■ EMA 를 재사용하는 이유
+        macd/signal 둘 다 EMA 계산이고, 이미 있는 EMA 와 완전히 같은
+        공식이어야 한다. 따로 구현하면 두 계산이 미묘하게 달라질
+        여지가 생긴다.
+
+    ■ signal 은 '봉'이 아니라 'macd 값'의 EMA다
+        EMA.update() 는 getattr(bar, src) 로 값을 읽으므로, macd 값을
+        그대로 넣을 수 없다. _Scalar 로 감싸서 넣는다.
+
+    등록: self.macd = self.ind(MACD(12, 26, 9), override="MACD")
+    조회: self.macd.line("macd") / .line("signal") / .line("histo")
+         (.value 는 라인이 셋이라 항상 None — 반드시 .line(이름)으로 읽을 것)
+    """
+
+    def __init__(self, fast: int = 12, slow: int = 26, signal: int = 9,
+                 src: str = "close"):
+        self.fast_ema = EMA(fast, src=src)
+        self.slow_ema = EMA(slow, src=src)
+        self.signal_ema = EMA(signal, src="v")   # _Scalar.v 를 읽는다
+
+    @property
+    def warmup(self) -> Optional[int]:
+        """macd 가 나오기 시작한 뒤로 signal 개를 더 모아야 signal/histo
+        가 나온다."""
+        f, s, sig = self.fast_ema.warmup, self.slow_ema.warmup, self.signal_ema.warmup
+        if f is None or s is None or sig is None:
+            return None
+        return max(f, s) + sig
+
+    def update(self, bar):
+        f = self.fast_ema.update(bar)
+        s = self.slow_ema.update(bar)
+        if f is None or s is None:
+            return None                          # 아직 fast/slow 도 안 데워짐
+
+        macd_val = f - s
+        self._values["macd"] = macd_val
+
+        sig_val = self.signal_ema.update(_Scalar(macd_val))
+        self._values["signal"] = sig_val
+        self._values["histo"] = None if sig_val is None else macd_val - sig_val
+        return macd_val
 
 
 # ═══════════════════════════════════════════════════════════
@@ -405,12 +530,13 @@ class TickImbalance(Indicator):
         elif side == "sell":
             self.buf.append(-1)
         else:
-            return self._v                  # 방향 불명 — 이전 값 유지
+            return self.line("value")              # 방향 불명 — 이전 값 유지
 
         if len(self.buf) < self.period:
             return None                     # 아직 덜 찼다
-        self._v = sum(self.buf) / self.period
-        return self._v
+        value = sum(self.buf) / self.period
+        self._values["value"] = value
+        return value
 
 
 class SpreadEMA(Indicator):
@@ -431,12 +557,15 @@ class SpreadEMA(Indicator):
     def update(self, ev):
         sp = getattr(ev, "spread", None)
         if sp is None:
-            return self._v                  # 호가가 한쪽만 있으면 건너뛴다
+            return self.line("value")              # 호가가 한쪽만 있으면 건너뛴다
 
-        if self._v is None:
+        cur = self._values.get("value")
+        if cur is None:
             self.buf.append(sp)
             if len(self.buf) == self.period:
-                self._v = sum(self.buf) / self.period
+                cur = sum(self.buf) / self.period
         else:
-            self._v = sp * self.k + self._v * (1 - self.k)
-        return self._v
+            cur = sp * self.k + cur * (1 - self.k)
+
+        self._values["value"] = cur
+        return cur

@@ -191,8 +191,16 @@ class SimBroker(Broker):
               ref_price    평가 기준가
               trade_price  실제 거래가 (호가 갱신은 None)
               quote        (매수1호가, 매도1호가)
-        """
-        self._now = ev.dt
+
+        ★ 시계는 절대 뒤로 안 간다 ★
+          ev.dt 는 틱에 실린 체결시간을 그대로 쓴다. 그 값이 어떤
+          이유로든(피드 쪽 시간 역전, 순서가 어긋난 패킷 등) 이전보다
+          이르게 들어오면 self._now 가 뒤로 가면서, 그 직전에 잡아둔
+          주문의 _eligible 시각을 영원히 다시 못 넘어 그 주문만 하염없이
+          미체결로 멈춘다 — 한 번 벌어지면 스스로 못 고친다. max() 로
+          단조증가를 강제해서 이 클래스를 막는다."""
+        if ev.dt > self._now:
+            self._now = ev.dt
 
         if ev.quote:
             self._quote[ev.symbol] = ev.quote

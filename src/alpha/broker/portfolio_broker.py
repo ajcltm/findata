@@ -140,6 +140,7 @@ class StrategyBroker(Broker):
                 log.warning("[%s] %s", self.sid, order.reject_reason)
                 return order
 
+        order.strategy_id = self.sid        # 소유권이 정해지는 시점 — 기록/조회용
         self._orders[order.id] = order      # 체결을 되돌려받기 위한 소유권 기록
         return self.real.submit(order)
 

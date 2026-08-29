@@ -107,6 +107,11 @@ class Order:
     updated_at: Optional[datetime] = None
     reject_reason: str = ""
 
+    # ★ 기록/조회용 — Order 자신은 어느 전략 것인지 모른다(브로커가 안다).
+    #   StrategyBroker.submit() 이 소유권이 정해지는 시점(자기 _orders에
+    #   올릴 때)에 한 번만 채운다. Trade.strategy_id 와 같은 이유·같은 자리다.
+    strategy_id: str = ""
+
     @property
     def remaining(self) -> float:
         """아직 안 채워진 수량. 취소·정정할 때 이 값을 쓴다."""
@@ -157,6 +162,11 @@ class Position:
     size: float = 0.0           # + 롱, - 숏, 0 보유없음
     avg_price: float = 0.0      # 매입 평균단가 (원가)
     last_price: float = 0.0     # 현재가. 수량 계산과 평가손익에 쓴다
+
+    # ★ 기록/조회용 — Position 자신은 어느 전략 것인지 모른다(StrategyBroker
+    #   가 안다). Engine.feed_fill() 이 view_q 에 흘리기 직전에 그 전략의
+    #   sid 를 채워 넣는다. Trade/Order 의 strategy_id 와 같은 이유다.
+    strategy_id: str = ""
 
     @property
     def is_flat(self) -> bool:
@@ -983,8 +993,8 @@ class Strategy:
         return {sym: self.ind(factory(), on=on, variant=variant, symbol=sym)
                 for sym in symbols}
 
-    def indicator_snapshot(self, ev: Optional[MarketEvent] = None) -> dict[str, Optional[float]]:
-        """지금 지표들의 값. {label: value}
+    def indicator_snapshot(self, ev: Optional[MarketEvent] = None) -> list[tuple[str, str, Optional[float]]]:
+        """지금까지 낸 지표 값 전부. [(label, line, value), ...]
 
         기록·로그용. Trader 가 이벤트 처리 직후(훅 호출 직전)에 찍으면
         '전략이 판단할 때 본 값'이 남는다.
@@ -992,15 +1002,22 @@ class Strategy:
         ev 를 주면 그 이벤트에 매칭되는(= 방금 갱신된) 지표만 돌려준다.
         안 주면 등록된 지표 전부의 현재 상태를 돌려준다.
 
-        ■ 왜 필요한가
+        ■ 왜 필요한가 (ev 필터)
             한 전략이 여러 봉 주기(예: 60초+300초)를 같이 구독하면,
             필터 없이 전부 돌려줄 경우 60초봉이 마감될 때마다 아직
             안 바뀐 300초봉 지표까지 매번 같이 기록돼 중복이 쌓인다.
             _record_indicators 가 이걸로 '방금 이 이벤트가 실제로
-            갱신한 지표'만 골라 기록한다."""
+            갱신한 지표'만 골라 기록한다.
+
+        ■ (label, line, value) 인 이유
+            지표 하나가 라인을 여러 개 낼 수 있다(MACD의 macd/signal/
+            histo 등, indicators.py 참고). 라인이 하나뿐인 지표도 그
+            라인 이름 그대로 나온다(관례상 "value")."""
         slots = (self._indicators if ev is None
                 else [s for s in self._indicators if s.matches(ev)])
-        return {slot.label: slot.ind.value for slot in slots}
+        return [(slot.label, line, val)
+                for slot in slots
+                for line, val in slot.ind.values().items()]
 
     @property
     def ready(self) -> bool:
@@ -1333,10 +1350,10 @@ class Trader:
         아무 일도 하지 않는다."""
         if self.recorder is None and self.view_q is None:
             return
-        for label, value in self.strategy.indicator_snapshot(ev).items():
+        for label, line, value in self.strategy.indicator_snapshot(ev):
             snap = IndicatorSnapshot(
                 dt=ev.dt, strategy_id=self.strategy_id, symbol=ev.symbol,
-                label=label, line="", value=value, trigger=ev.kind,
+                label=label, line=line, value=value, trigger=ev.kind,
             )
             if self.recorder is not None:
                 self.recorder.put(snap)

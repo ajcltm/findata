@@ -13,14 +13,15 @@ indicator_watcher.py — 지표만 계산·기록하는 관찰용 전략. 주문
 
 from __future__ import annotations
 
-from alpha.indicators.indicators import ATR, SMA, CrossOver
+from alpha.indicators.indicators import ATR, MACD, SMA, CrossOver
 from alpha.trader.trading import Strategy
 
 
 class IndicatorWatcher(Strategy):
-    """SMA/CrossOver/ATR 만 갱신·기록한다. 주문은 내지 않는다."""
+    """SMA/CrossOver/ATR/MACD 만 갱신·기록한다. 주문은 내지 않는다."""
 
-    defaults = dict(symbol="005930", fast=5, slow=20, atr_period=10)
+    defaults = dict(symbol="005930", fast=5, slow=20, atr_period=10,
+                    macd_fast=12, macd_slow=26, macd_signal=9)
 
     def setup(self):
         # symbol= 은 matches() 필터링에만 쓰고, name= 으로 라벨은 심볼
@@ -32,3 +33,8 @@ class IndicatorWatcher(Strategy):
         self.slow = self.ind(slow, symbol=sym, name=slow.name)
         self.cross = self.ind(cross, symbol=sym, name=cross.name)
         self.atr = self.ind(atr, symbol=sym, name=atr.name)
+
+        # MACD는 라인이 셋(macd/signal/histo)이라 label을 "MACD"로 고정해둔다
+        # — __main__.py의 where={"label": "MACD"} 뷰가 이 문자열을 그대로 쓴다.
+        macd = MACD(self.p.macd_fast, self.p.macd_slow, self.p.macd_signal)
+        self.macd = self.ind(macd, symbol=sym, name="MACD")

@@ -384,7 +384,9 @@ class Engine:
             #   심볼만은 _pos 존재 여부와 무관하게 항상 명시적으로 민다.
             v = self.portfolio._views.get(sid)
             if v is not None:
-                self.view_q.put(v.position(fill.symbol))
+                pos = v.position(fill.symbol)
+                pos.strategy_id = sid       # 기록/조회용 — v.position()은 이걸 모른다
+                self.view_q.put(pos)
         self._push_positions()
 
     def _push_positions(self):
@@ -411,7 +413,9 @@ class Engine:
             return
         for v in self.portfolio._views.values():
             for symbol in v._pos:
-                self.view_q.put(v.position(symbol))
+                pos = v.position(symbol)
+                pos.strategy_id = v.sid     # 기록/조회용 — v.position()은 이걸 모른다
+                self.view_q.put(pos)
 
     def feed_order(self, order: Order):
         """주문 상태 변화. 그 주문을 낸 전략에만 알린다."""

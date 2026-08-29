@@ -528,7 +528,7 @@ def domestic_stock_order_cancel(krx_fwdg_ord_orgno: str, orgn_odno: str):
         "authorization": f"Bearer {kis_config.ACCESS_TOKEN}",
         "appkey": kis_config.APPKEY,
         "appsecret": kis_config.APPSECRET,
-        "tr_id": 'TTTC0014U',   # 취소. TTTC0013U 는 정정용이다(혼동 주의).
+        "tr_id": 'TTTC0013U', 
         "custtype": 'P'  # B:법인, P:개인,
     }
 
@@ -537,8 +537,8 @@ def domestic_stock_order_cancel(krx_fwdg_ord_orgno: str, orgn_odno: str):
     data = {
         "CANO": kis_config.CANO,
         "ACNT_PRDT_CD": kis_config.ACNT_PRDT_CD,
-        "KRX_FWDG_ORD_ORGNO": krx_fwdg_ord_orgno,  # 원주문 접수 시의 거래소전송주문조직번호
-        "ORGN_ODNO": orgn_odno,  # 원주문번호,
+        "KRX_FWDG_ORD_ORGNO": str(krx_fwdg_ord_orgno),  # 원주문 접수 시의 거래소전송주문조직번호
+        "ORGN_ODNO": str(orgn_odno),  # 원주문번호,
         "ORD_DVSN": '00',  # 주문구분 00 : 지정가 / 01 : 시장가
         "RVSE_CNCL_DVSN_CD": '02',  # 정정/취소구분코드, 01: 정정, 02: 취소
         "ORD_QTY": '0',  # QTY_ALL_ORD_YN='Y' 라 무시된다(잔량 전체 취소),

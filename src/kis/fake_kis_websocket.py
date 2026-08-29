@@ -213,13 +213,25 @@ class FakeKisWebSocket:
         return p
 
     def _make_trade(self, code: str) -> str:
-        """H0STCNT0 실시간 체결가. 앞 몇 개 필드만 실제와 맞춘다."""
+        """H0STCNT0 실시간 체결가. 앞 몇 개 필드만 실제와 맞춘다.
+
+        ★ 체결시간은 '연결 이후 실제 경과시간'으로 만든다 ★
+          예전엔 self._seq(누적 틱 개수)를 9시 기준으로 역산했는데,
+          seq // 3600 % 6 처럼 6을 모듈로 걸어놔서 seq가 21600(6*3600)을
+          넘는 순간 14:59:59 다음이 09:00:00으로 6시간 뒤로 점프했다.
+          SimBroker._now 가 이 값을 그대로 자기 시계로 쓰는데, 그 직전에
+          eligible 시각을 그 근처로 박아둔 주문은 시계가 뒤로 가버리면
+          영원히 그 시각을 다시 못 넘어서 매매가 하염없이 멈춰버렸다.
+          실제 경과시간은 세션이 끝날 때까지 단조증가하므로 이 문제가
+          구조적으로 안 생긴다."""
         self._seq += 1
         px = self._walk(code)
+        total = 9 * 3600 + int(self._elapsed())      # 09:00:00 + 경과초
+        hh, rem = divmod(total, 3600)
+        mm, ss = divmod(rem, 60)
         f = [
             code,                                   # 종목코드
-            f"{9 + self._seq // 3600 % 6:02d}"
-            f"{self._seq // 60 % 60:02d}{self._seq % 60:02d}",  # 체결시간
+            f"{hh % 24:02d}{mm:02d}{ss:02d}",        # 체결시간
             str(px),                                # 현재가
             self.rng.choice(["2", "5"]),            # 등락구분
             str(self.rng.randint(-500, 500)),       # 전일대비

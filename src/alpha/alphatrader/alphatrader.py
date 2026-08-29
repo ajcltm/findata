@@ -207,7 +207,7 @@ class AlphaTrader:
         log.info("AlphaTrader.run_live — LiveRunner 기동 완료")
         return runner
 
-    def run_sim(self, market_event_queue, cash: float = 10_000_000,
+    def run_sim(self, market_event_queue, cash: float = 100_000_000_000,
                 business_date: Optional[date] = None,
                 kill_file: str = "./STOP_TRADING",
                 on_quit: Optional[Callable[[], None]] = None,
