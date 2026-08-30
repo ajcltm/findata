@@ -23,15 +23,20 @@ import logging
 from datetime import date
 from typing import Callable, Optional
 
+from kis import kis_config
+
 from alpha.engine.engine import Engine
 from alpha.engine.live_runner import LiveRunner
 from alpha.broker.kis_broker import KISBroker
 from alpha.broker.sim_broker import SimBroker
-from alpha.strategy.manual import ManualStrategy, MANUAL_STRATEGY_ID
-from alpha.trader.trading import Strategy
+from alpha.events import events
 from alpha.recording.recorder import Recorder
+from alpha.recording.sinks import SqliteSink
+from alpha.strategy.manual import ManualStrategy, MANUAL_STRATEGY_ID
+from alpha.trader.trading import (AccountSnapshot, Fill, IndicatorSnapshot, Order,
+                                   Position, Strategy, Trade)
 from alpha.view.app import Application
-from alpha.view.model import Aggregator
+from alpha.view.model import Aggregator, Board, Latest, Pivot, Recent
 
 log = logging.getLogger("main")
 
@@ -70,13 +75,20 @@ class AlphaTrader:
         self.state_dir = state_dir
         self._specs: list[dict] = []
         self._view_specs: list[dict] = []
+        # 기본 뷰(_ensure_default_recording_and_views)는 build_trader() 가
+        # 언제 add_view() 를 부르든(그 전이든 후든) 항상 먼저 화면 번호를
+        # 차지하도록 별도 목록에 쌓아둔다 — _apply_view() 에서 이 목록을
+        # 사용자가 등록한 _view_specs 보다 앞에 재생한다.
+        self._default_view_specs: list[dict] = []
 
         # 지표 값(IndicatorSnapshot) 등, 전략이 만들어내는 파생 데이터를
-        # 저장할 레코더. 무엇을 어디에 저장할지는 여기서 정하지 않는다 —
-        # add_recording() 으로 메인 파일이 build_trader() 자리에서 등록한다.
-        # data/kis_data.db(시세 원본)와 별개인 이유는 지표가 전략에 딸린
-        # 파생 데이터라 소스(KiSEngine)와 소비자(AlphaTrader)를 나눠서다.
+        # 저장할 레코더. data/kis_data.db(시세 원본)와 별개인 이유는 지표가
+        # 전략에 딸린 파생 데이터라 소스(KiSEngine)와 소비자(AlphaTrader)를
+        # 나눠서다. 표준 레코딩/뷰는 _ensure_default_recording_and_views() 가
+        # 자체 등록한다 — build_trader() 자리에는 전략별로 다른 것만 남긴다
+        # (예: MACD처럼 라인이 여럿인 지표 전용 뷰).
         self._recorder = Recorder()
+        self._defaults_built = False
 
     # ── 전략 등록 ────────────────────────────────────────────────
     def add_strategy(self, strategy_id: str, strategy: Strategy,
@@ -112,6 +124,81 @@ class AlphaTrader:
         self.add_strategy(MANUAL_STRATEGY_ID, ManualStrategy(),
                           allocation=float("inf"))
 
+    def _ensure_default_recording_and_views(self, simul_mode: bool) -> None:
+        """어떤 전략 조합이든 항상 똑같이 필요한 레코더/뷰 구독을 자체 등록한다.
+
+        ★ build_trader() 자리에는 무엇만 남기나 ★
+            ① 전략 등록(add_strategy) — 프로젝트마다 다르다.
+            ② MACD처럼 라인이 여럿인 지표의 전용 뷰 — label이 그 지표
+               구현(IndicatorWatcher.setup())에 종속돼 있어서 여기서
+               일반화할 수 없다.
+            나머지(Fill/Trade/IndicatorSnapshot(단일 라인)/Bar/Tick/Quote/
+            Notice 레코딩과 그 표준 뷰)는 어떤 전략을 쓰든 항상 같으므로
+            여기 한 곳에 둔다 — build_trader() 를 고칠 때마다 매번
+            그대로 옮겨 적어야 했던 보일러플레이트를 없앤다.
+
+        run_live/run_sim/run_backtest 가 알아서 부른다. 멱등이라 여러 번
+        불려도 두 번 등록되지 않는다."""
+        if self._defaults_built:
+            return
+        self._defaults_built = True
+
+        # ── 레코더 구독 — Engine.feed()/Trader 안에서만 만들어지는 데이터를
+        #    어디에 저장할지. Tick/Quote는 build_recording(kis)가 kis_data.db에
+        #    원본(파싱 직후)을 이미 저장하지만, 여기서도 한 번 더 alpha_data.db에
+        #    남긴다 — Engine.feed()를 통과한(=전략에 실제로 배달된) 이벤트라서
+        #    kis_data.db 쪽과 타이밍/필터링이 다를 수 있다.
+        db_name = "alpha_data_sim.db" if simul_mode else "alpha_data.db"
+        alpha_sink = SqliteSink(str(kis_config.DATA_DIR / db_name))
+
+        self.add_recording(Fill, alpha_sink, name="fill")
+        # Trade(라운드트립 완결)는 strategy_id 를 자기 필드로 갖는다
+        # (Trader.feed_fill() 이 채워 넣는다) — extra 로 주지 않는다. extra 는
+        # 구독 채널 하나에 고정되는 값이라, 거래를 내는 전략이 둘 이상이면
+        # 같은 Recorder 에 Trade 를 또 구독해 extra 만 다르게 줘도 안 나뉜다
+        # (Recorder 가 같은 타입의 모든 구독 채널에 레코드를 전부 복사해
+        # 뿌리기 때문에, 그러면 서로 다른 전략의 거래가 양쪽 테이블에 겹쳐
+        # 들어가고 strategy_id 도 뒤섞인다). 필드로 두면 전략이 몇 개든 안전하다.
+        self.add_recording(Trade, alpha_sink, name="trade")
+        self.add_recording(IndicatorSnapshot, alpha_sink, name="indicator")
+        self.add_recording(events.Bar, alpha_sink, name="bar")
+        self.add_recording(events.Tick, alpha_sink, name="tick")
+        self.add_recording(events.Quote, alpha_sink, name="quote")
+        # events.Notice — 실전(KiSEngine)/모의(SimBroker) 체결통보가 이제
+        # 하나의 정규화된 타입이라 여기 한 번만 등록하면 둘 다 잡힌다.
+        self.add_recording(events.Notice, alpha_sink, name="notice")
+
+        # ── 콘솔 뷰 구독 — 등록 순서가 곧 'v' 화면의 숫자키(1,2,3...) ──
+        #    add_view() 가 아니라 _add_default_view() 를 쓴다 — build_trader()
+        #    에서 add_view() 로 등록하는 사용자 뷰(MACD 등)가 항상 이 뒤로
+        #    가게 하려는 것이다(_apply_view() 참고).
+        self._add_default_view(events.Tick, Board(cols=["dt", "price", "volume"]), name="시세판")
+        self._add_default_view(events.Quote, Latest(), name="호가")
+        self._add_default_view(events.Notice, Recent(100000, cols=["dt", "symbol", "order_no", "filled_qty", "price", "rejected"]), name="체결통보")
+        self._add_default_view(events.Bar, Recent(20, cols=["dt", "symbol", "open", "high", "low", "close", "volume"]), name="봉")
+
+        self._add_default_view(Trade, Recent(100000, cols=["strategy_id", "symbol", "size", "entry_dt", "entry_price", "exit_dt", "exit_price", "gross_pnl", "commission"]), name="거래(trade)")
+        self._add_default_view(Fill, Recent(100000, cols=["dt", "symbol", "side", "size", "price", "order_id", "commission"]), name="체결(fill)")
+        self._add_default_view(Position, Board(by="symbol", cols=["strategy_id", "size", "avg_price", "last_price"]), name="포지션")
+        # price 는 주문 낼 때 지정한 값이라 시장가 주문은 애초에 None이다.
+        # 실제로 체결된 가격은 avg_fill_price(Order.apply_fill()이 채움)에 있다 —
+        # 이걸 안 보여주면 시장가 체결이 화면에서 전부 "-"로만 보인다.
+        # render_interval=60 — 'oc 주문id'로 취소를 타이핑하는 동안 화면이
+        # 지워지면 안 되는 패널은 이거 하나뿐이다. 나머지 패널은 안 줘서
+        # 기본 1초 그대로 자동 갱신된다.
+        self._add_default_view(Order, Board(by="id", cols=["strategy_id", "symbol", "side", "size", "filled_size", "price", "avg_fill_price", "status", "created_at", "updated_at"]), name="주문", render_interval=60.0)
+        # AccountSnapshot — cash/equity 는 Broker.@property 라 자체 이벤트가
+        # 없다. Trader.feed_timer(보통 1초 간격)가 찍어서 흘린다(trading.py 참고).
+        self._add_default_view(AccountSnapshot, Board(by="strategy_id", cols=["dt", "cash", "equity"]), name="계좌")
+
+        # 단일 라인 지표(SMA/RSI/ATR/CrossOver 등)는 전부 라인 이름을 "value"로
+                # 통일해서 쓴다(indicators.py 관례) — 그래야 where={"line":"value"}
+                # 하나로 다중 라인 지표(MACD 등)와 자동으로 갈린다. 안 걸러내면 MACD의
+                # macd/signal/histo 가 label="MACD" 한 칸에서 서로 덮어써서 뒤섞인다.
+                # MACD처럼 라인이 여럿인 지표의 전용 화면은 build_trader() 에서
+                # (label을 아는 자리에서) 따로 등록한다.
+        self._add_default_view(IndicatorSnapshot, Pivot(), name="지표", where={"line": "value"})
+
     # ── 레코더 구독 등록 ─────────────────────────────────────────
     def add_recording(self, dtype: type, sink, name: Optional[str] = None,
                        **kwargs) -> "AlphaTrader":
@@ -143,8 +230,19 @@ class AlphaTrader:
         log.info("뷰 구독 등록: %s (%s)", name or dtype.__name__, type(agg).__name__)
         return self
 
+    def _add_default_view(self, dtype: type, agg: Aggregator, name: Optional[str] = None,
+                          where=None, render_interval: Optional[float] = None) -> None:
+        """add_view() 와 같지만 _default_view_specs 에 쌓는다.
+        _ensure_default_recording_and_views() 전용 — build_trader() 에서
+        add_view() 로 등록한 사용자 뷰가 항상 뒤 번호를 받게 하려는 것이다."""
+        self._default_view_specs.append(dict(dtype=dtype, agg=agg, name=name, where=where,
+                                             render_interval=render_interval))
+        log.info("뷰 구독 등록(기본): %s (%s)", name or dtype.__name__, type(agg).__name__)
+
     def _apply_view(self, app: Application) -> Application:
-        for spec in self._view_specs:
+        # 기본 뷰가 먼저 숫자키를 차지하고, build_trader() 에서 add_view() 로
+        # 등록한 사용자 뷰(MACD 등)는 그 뒤로 간다.
+        for spec in self._default_view_specs + self._view_specs:
             app.subscribe(spec["dtype"], spec["agg"], name=spec["name"], where=spec["where"],
                           render_interval=spec["render_interval"])
         return app
@@ -188,6 +286,7 @@ class AlphaTrader:
         log.info("AlphaTrader.run_live 시작 — 전략 %d개, dry_run=%s", len(self._specs), dry_run)
         broker = KISBroker()
         self._ensure_manual_strategy()
+        self._ensure_default_recording_and_views(simul_mode=False)
 
         # Application(view_q)을 Engine보다 먼저 만든다 — Engine.feed()가
         # 만드는 봉/외부이벤트를 view_q로 바로 흘리려면 Engine 생성 시점에
@@ -212,6 +311,7 @@ class AlphaTrader:
                 kill_file: str = "./STOP_TRADING",
                 on_quit: Optional[Callable[[], None]] = None,
                 ws=None,
+                simul_mode: bool = False,
                 **sim_broker_kwargs) -> LiveRunner:
         """모의투자. 실시간 market_event_queue 로 시세를 받되 주문은 가짜다.
 
@@ -219,11 +319,15 @@ class AlphaTrader:
           fill_q=market_event_queue 로 넘기면 시세와 모의체결이 한 큐에서
           순서대로 나온다 — LiveRunner 가 실전과 똑같은 소비 루프로 처리한다.
 
-        on_quit : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다.
-        ws      : run_live 와 같다 — 수동 주문 화면의 종목 번호 목록용."""
+        on_quit    : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다.
+        ws         : run_live 와 같다 — 수동 주문 화면의 종목 번호 목록용.
+        simul_mode : True면 alpha_data_sim.db(테스트용 fake 피드), False면
+                     alpha_data.db — 호출자가 KiSEngine(simul_mode=...)에
+                     준 값과 같은 값을 그대로 줄 것(레코딩 파일이 갈린다)."""
         log.info("AlphaTrader.run_sim 시작 — 전략 %d개, cash=%s", len(self._specs), cash)
         broker = SimBroker(fill_q=market_event_queue, cash=cash, **sim_broker_kwargs)
         self._ensure_manual_strategy()
+        self._ensure_default_recording_and_views(simul_mode=simul_mode)
         app = self._apply_view(Application(on_quit=on_quit, ws=ws))
         eng = self._build_engine(broker, dry_run=False, view_q=app.view_q)   # 모의는 항상 가짜주문을 낸다
         app.ctx.engine = eng
@@ -246,6 +350,8 @@ class AlphaTrader:
         환경에 backtrader 가 없어도 되도록 여기서 지역 import 한다."""
         log.info("AlphaTrader.run_backtest 시작 — 전략 %d개, symbol=%s seconds=%d",
                 len(self._specs), symbol, seconds)
+        # 백테스트엔 kis_data_sim.db 개념이 없다 — alpha_data.db 고정.
+        self._ensure_default_recording_and_views(simul_mode=False)
         from alpha.broker.bt_broker import run_backtest as _run_backtest
         try:
             return _run_backtest(

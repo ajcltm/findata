@@ -112,6 +112,34 @@ class Inbox:
                 for t, name, summary in reversed(self.recent)]
 
 
+class RawFeed:
+    """큐에서 나온 객체를 가공 없이 최근 N건 그대로 쌓아둔다. 'r' 화면 전용.
+
+    ■ Inbox 와 다른 점
+        Inbox.recent_lines() 는 홈 대시보드 미리보기용이다 — 한 줄에
+        필드 하나(요약)만 남기고, 개수도 12건뿐이다(화면 한 귀퉁이에
+        박아 넣을 크기). 'r' 화면은 "큐에 뭐가 들어왔는지 그 자체를
+        본다"가 목적이므로, 필드를 하나도 버리지 않고 스크롤할 만큼
+        넉넉히 쌓아둔다.
+    """
+
+    def __init__(self, maxlen: int = 500):
+        self.buffer: deque = deque(maxlen=maxlen)
+
+    def on_object(self, obj) -> None:
+        """렌더 스레드에서만 부른다."""
+        self.buffer.append((time.time(), type(obj).__name__, to_row(obj)))
+
+    def lines(self) -> list[str]:
+        """최근 것이 위로 오게, 객체가 가진 필드를 전부 한 줄에 편다."""
+        out = []
+        for t, name, row in reversed(self.buffer):
+            ts = datetime.datetime.fromtimestamp(t).strftime("%H:%M:%S")
+            body = " ".join(f"{k}={cell(v)}" for k, v in row.items() if k is not "raw")
+            out.append(f"{ts}  {name:<16}{body}")
+        return out
+
+
 # ══════════════════════════════════════════════════════════════════
 # ② 구독형 집계 — 모델을 안 만들어도 화면이 나오게 하는 부분
 # ══════════════════════════════════════════════════════════════════
@@ -734,6 +762,7 @@ class AppCtx:
                  engine=None):
         self.ws = ws                        # 웹소켓 엔진 (종목 구독용)
         self.inbox = Inbox(view_q)          # 큐 통계 → 홈 대시보드
+        self.raw = RawFeed()                # 큐 원본 그대로 → 'r' 수신 로그 화면
         self.feed = feed or FeedHub()       # 구독형 화면
         # Engine. 콘솔 수동 주문 화면이 engine.slots[...] 로 StrategyBroker를
         # 찾아 실제 주문을 낸다. Application 생성 시점엔 아직 없을 수 있어
@@ -854,7 +883,7 @@ class RealData(Paged):
         self.only: str | None = None        # 문자열 포함 필터
 
     def rows(self) -> list:
-        items = self.ctx.inbox.recent_lines()
+        items = self.ctx.raw.lines()
         if self.only:
             items = [t for t in items if self.only in t]
         return self.page(items)

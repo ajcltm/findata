@@ -141,7 +141,9 @@ class Runtime:
                     continue
                 # ① 대시보드 통계 — 타입 이름으로만 세므로 무엇이 와도 된다
                 self.app.ctx.inbox.on_object(obj)
-                # ② 구독형 화면 — 구독 안 된 타입은 알아서 흘려보낸다
+                # ② 'r' 수신 로그 — 가공 없이 원본 그대로 쌓아둔다
+                self.app.ctx.raw.on_object(obj)
+                # ③ 구독형 화면 — 구독 안 된 타입은 알아서 흘려보낸다
                 self.app.ctx.feed.on_object(obj)
             finally:
                 self.view_q.task_done()

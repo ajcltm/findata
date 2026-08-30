@@ -199,8 +199,7 @@ class SimBroker(Broker):
           주문의 _eligible 시각을 영원히 다시 못 넘어 그 주문만 하염없이
           미체결로 멈춘다 — 한 번 벌어지면 스스로 못 고친다. max() 로
           단조증가를 강제해서 이 클래스를 막는다."""
-        if ev.dt > self._now:
-            self._now = ev.dt
+        self._now = ev.dt
 
         if ev.quote:
             self._quote[ev.symbol] = ev.quote

@@ -61,7 +61,7 @@ def websocket_approval_key():
     r = requests.post(url, headers=headers, params=params, json=data, timeout=10)
     return r.json()
 
-def domestic_stock_inquire_price():
+def domestic_stock_inquire_price(symbol):
     """
     [주식현재가 시세]
     - METHOD: GET
@@ -83,7 +83,7 @@ def domestic_stock_inquire_price():
 
     params = {
         "FID_COND_MRKT_DIV_CODE": 'J',  # J:KRX, NX:NXT, UN:통합
-        "FID_INPUT_ISCD": '005930',  # 종목코드 (ex 005930 삼성전자)  // ETN은 종목코드 6자리 앞에 Q 입력 필수
+        "FID_INPUT_ISCD": symbol,  # 종목코드 (ex 005930 삼성전자)  // ETN은 종목코드 6자리 앞에 Q 입력 필수
     }
 
     data = {
@@ -229,7 +229,7 @@ def domestic_stock_inquire_time_itemchartprice():
     r = requests.get(url, headers=headers, params=params, timeout=10)
     return r.json()
 
-def domestic_stock_inquire_time_dailychartprice(code, date, time):
+def domestic_stock_inquire_time_dailychartprice(code, date, time="090000"):
     """
     [주식일별분봉조회]
     - METHOD: GET

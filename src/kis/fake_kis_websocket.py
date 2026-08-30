@@ -212,8 +212,8 @@ class FakeKisWebSocket:
         self._prices[code] = p
         return p
 
-    def _make_trade(self, code: str) -> str:
-        """H0STCNT0 실시간 체결가. 앞 몇 개 필드만 실제와 맞춘다.
+    def _hhmmss(self) -> str:
+        """'연결 이후 실제 경과시간'을 09:00:00 기준 HHMMSS로.
 
         ★ 체결시간은 '연결 이후 실제 경과시간'으로 만든다 ★
           예전엔 self._seq(누적 틱 개수)를 9시 기준으로 역산했는데,
@@ -223,15 +223,27 @@ class FakeKisWebSocket:
           eligible 시각을 그 근처로 박아둔 주문은 시계가 뒤로 가버리면
           영원히 그 시각을 다시 못 넘어서 매매가 하염없이 멈춰버렸다.
           실제 경과시간은 세션이 끝날 때까지 단조증가하므로 이 문제가
-          구조적으로 안 생긴다."""
-        self._seq += 1
-        px = self._walk(code)
+          구조적으로 안 생긴다.
+
+        ★ 체결가(H0STCNT0)와 호가(H0STASP0) 둘 다 반드시 이걸 써야 한다 ★
+          예전엔 호가 쪽 시각 필드가 "123000"(12:30:00)으로 박혀 있었다.
+          SimBroker.on_market 의 단조증가 가드(ev.dt > self._now 일 때만
+          갱신)가 이 값을 '더 미래'로 보고 시계를 12:30:00으로 앞당겨
+          버린 뒤, 그 뒤로 오는 정상 체결가(09시대)는 전부 '과거'로
+          보여 시계가 12:30:00에 영원히 멈췄다 — 주문이 접수만 되고
+          체결은 하염없이 안 되는 사고가 여기서 났다."""
         total = 9 * 3600 + int(self._elapsed())      # 09:00:00 + 경과초
         hh, rem = divmod(total, 3600)
         mm, ss = divmod(rem, 60)
+        return f"{hh % 24:02d}{mm:02d}{ss:02d}"
+
+    def _make_trade(self, code: str) -> str:
+        """H0STCNT0 실시간 체결가. 앞 몇 개 필드만 실제와 맞춘다."""
+        self._seq += 1
+        px = self._walk(code)
         f = [
             code,                                   # 종목코드
-            f"{hh % 24:02d}{mm:02d}{ss:02d}",        # 체결시간
+            self._hhmmss(),                         # 체결시간
             str(px),                                # 현재가
             self.rng.choice(["2", "5"]),            # 등락구분
             str(self.rng.randint(-500, 500)),       # 전일대비
@@ -252,7 +264,7 @@ class FakeKisWebSocket:
         asks = [str(px + step * i) for i in range(1, 11)]
         bids = [str(px - step * i) for i in range(1, 11)]
         vols = [str(self.rng.randint(1, 9999)) for _ in range(20)]
-        f = [code, "123000", "0"] + asks + bids + vols
+        f = [code, self._hhmmss(), "0"] + asks + bids + vols
         f += ["0"] * (59 - len(f))
         return f"0|{self.sc.tr_orderbook}|001|{'^'.join(f)}"
 
