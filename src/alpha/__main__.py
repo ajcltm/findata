@@ -45,6 +45,7 @@ from kis.kis_engine import KiSEngine
 
 from alpha.alphatrader.alphatrader import AlphaTrader
 from alpha.recording.sinks import SqliteSink
+from alpha.strategy.dobi_watcher import DobiWatcher
 from alpha.strategy.indicator_watcher import IndicatorWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
@@ -142,6 +143,14 @@ def build_trader() -> AlphaTrader:
                             allocation=0,
                             bars=[(symbol, BAR_SECONDS)])
 
+    # DOBI(호가 기반)도 같은 이유로 종목마다 독립된 인스턴스가 필요하다.
+    # 봉이 아니라 호가(quote)로 갱신되므로 bars= 가 아니라 quotes= 로
+    # 구독한다 — DobiWatcher.setup() 참고.
+    for symbol in SYMBOL:
+        trader.add_strategy(f"dobi감시_{symbol}", DobiWatcher(symbol=symbol),
+                            allocation=0,
+                            quotes=[symbol])
+
     # MACD는 라인이 셋이라 일반 지표판(단일 라인, line="value")과 축이
     # 다르다(symbol×line) — 그래서 별도 화면으로 뺀다. label="MACD"는
     # IndicatorWatcher.setup()에서 override로 고정해둔 값과 반드시 같아야
@@ -149,6 +158,10 @@ def build_trader() -> AlphaTrader:
     # 할 수 있다.
     trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
                     name="MACD", where={"label": "MACD"})
+    # DOBI도 라인이 셋(imbalance/dobi/filtered)이라 같은 이유로 전용 화면.
+    # label="DOBI"는 DobiWatcher.setup()의 override와 반드시 같아야 한다.
+    trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+                    name="DOBI", where={"label": "DOBI"})
     return trader
 
 def build_recording(kis: KiSEngine, simul_mode: bool) -> None:

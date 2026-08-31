@@ -569,3 +569,69 @@ class SpreadEMA(Indicator):
 
         self._values["value"] = cur
         return cur
+
+
+class DOBI(Indicator):
+    """1호가 잔량 기반 Dynamic Order Book Imbalance.
+
+    ■ Quote.imbalance(events.py)와 다른 지표다
+        그쪽은 전체 호가 잔량 합계로 계산한다. 이건 1호가(최우선 호가)의
+        잔량만 쓴다 — 체결 직전 큐에 가장 가까운 자리라, 미세한 매수/매도
+        압력 변화가 먼저 드러난다.
+
+    ■ 세 라인 — 셋 다 대등하다(대표 라인 없음, MACD와 같은 이유)
+        imbalance  (매수1호가잔량 - 매도1호가잔량) / (둘의 합). -1~+1.
+        dobi       imbalance 의 변화량(이번 - 직전). 잔량이 밀리는 속도.
+        filtered   dobi 에 칼만 필터를 적용해 잡음을 줄인 값. 실전 신호로는
+                   보통 이 값을 쓴다.
+
+    ■ 칼만 필터 파라미터
+        var_err  관측(dobi) 잡음의 분산 — 클수록 매 순간의 관측을 덜 믿는다
+        var_sig  상태(filtered)가 실제로 움직이는 폭의 분산 — 클수록 상태가
+                 빨리 바뀐다고 본다
+        초기 오차공분산(_p)을 var_err 보다 훨씬 크게 잡아두면, 데이터가
+        쌓이기 전(칼만 게인이 1에 가까움)에는 관측값을 거의 그대로
+        따라가다가, 이후 서서히 평활된다.
+
+    등록: self.ind(DOBI(), on="quote", symbol=sym)  (여러 종목을 구독하는
+          전략에서는 symbol= 필수 — 안 주면 종목 잔량이 섞인다. 종목마다
+          별도 인스턴스가 필요하면 per_symbol() 을 쓸 것)
+    조회: self.dobi.line("imbalance") / .line("dobi") / .line("filtered")
+         (.value 는 라인이 셋이라 항상 None — 반드시 .line(이름)으로 읽을 것)
+    """
+
+    def __init__(self, var_err: float = 7_000_000, var_sig: float = 100):
+        self.var_err = var_err
+        self.var_sig = var_sig
+        self._a = 0.0                    # 칼만 필터 상태(추정치) = filtered
+        self._p = var_err * (10 ** 7)    # 칼만 필터 오차공분산(초기값을 크게)
+        self._prev_imbalance = None
+
+    def update(self, quote):
+        bid_qty = quote.bid_sizes[0] if quote.bid_sizes else 0.0
+        ask_qty = quote.ask_sizes[0] if quote.ask_sizes else 0.0
+        total = bid_qty + ask_qty
+
+        if total == 0:
+            return None          # 양쪽 다 잔량이 없다 — 이번 갱신은 건너뛴다
+
+        imbalance = (bid_qty - ask_qty) / total
+
+        # 최초 값은 비교할 직전 값이 없어 변화량을 0으로 둔다
+        # (CrossOver 의 '첫 계산은 차이만 기록' 과 같은 규칙).
+        if self._prev_imbalance is None:
+            dobi = 0.0
+        else:
+            dobi = imbalance - self._prev_imbalance
+        self._prev_imbalance = imbalance
+
+        # 칼만 필터 — dobi 를 관측치로, self._a 를 상태 추정치로 갱신한다.
+        innovation = dobi - self._a
+        gain = self._p / (self._p + self.var_err)
+        self._p = gain * self.var_err + self.var_sig
+        self._a = self._a + gain * innovation
+
+        self._values["imbalance"] = imbalance
+        self._values["dobi"] = dobi
+        self._values["filtered"] = self._a
+        return self._a
