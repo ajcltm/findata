@@ -221,6 +221,7 @@ def cell(value, max_len: int = 100) -> str:
         datetime(2024,1,15,9,30,15) → "09:30:15"
         70000.0                     → "70,000"
         12.5                        → "12.50"
+        0.0034                      → "0.003400"   ← 1 미만은 소수점 6자리
         None                        → "-"
         "아주긴문자열입니다다다다다" → "아주긴문자열입니다다다…"
     """
@@ -231,8 +232,14 @@ def cell(value, max_len: int = 100) -> str:
     if isinstance(value, datetime.date):
         return value.isoformat()
     if isinstance(value, float):
+        a = abs(value)
+        if a < 1:
+            # ofi_norm/imbalance/slope 같은 -1~1 스케일 지표값은 .2f로
+            # 뭉개진다(0.0012와 0.0034가 둘 다 "0.00") — 여기서만 소수점을
+            # 늘린다. 가격·수량(전부 abs>=1)은 원래 포맷 그대로다.
+            return f"{value:.6f}"
         # 작은 수는 소수점까지, 큰 수는 천단위 콤마만
-        return f"{value:,.2f}" if abs(value) < 1000 else f"{value:,.0f}"
+        return f"{value:,.2f}" if a < 1000 else f"{value:,.0f}"
     if isinstance(value, int):
         return f"{value:,}"
 

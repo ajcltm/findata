@@ -236,6 +236,7 @@ class SimBroker(Broker):
             # KiSEngine처럼 별도 정규화 함수를 거칠 필요 없이 여기서
             # 바로 events.Notice를 완성한다.
             notice = Notice(kind="notice", symbol=order.symbol, dt=self._now,
+                            recv_dt=datetime.now(),   # 실제로 이 판정이 일어난 로컬 벽시계 시각
                             order_no=order.id, rejected=False,
                             filled_qty=order.remaining, price=px)
             try:

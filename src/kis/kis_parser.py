@@ -267,7 +267,15 @@ class KISParser:
 
     @staticmethod
     def now() -> str:
-        return datetime.datetime.now().isoformat(timespec="seconds")
+        """이 전문을 실제로 수신·파싱한 시각(로컬 벽시계).
+
+        ★ 초 단위로 자르지 않는다 ★
+          거래소 전송시각(execution_time 등)은 KIS 전문 자체가 HHMMSS라
+          초 밑이 없다 — 그건 여기서 못 고친다. 반면 이 값은 우리
+          로컬에서 찍는 시각이라 마이크로초까지 살릴 수 있다. 예전엔
+          timespec="seconds"로 여기마저 초 단위로 잘라서, 정작 틱 단위
+          분석에 필요한 유일한 서브초 정보원을 스스로 버리고 있었다."""
+        return datetime.datetime.now().isoformat(timespec="microseconds")
 
 
 # ── 선택적 타입 변환 ────────────────────────────────────────────

@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import Callable, Optional
 
 from kis import kis_config
@@ -34,7 +34,7 @@ from alpha.recording.recorder import Recorder
 from alpha.recording.sinks import SqliteSink
 from alpha.strategy.manual import ManualStrategy, MANUAL_STRATEGY_ID
 from alpha.trader.trading import (AccountSnapshot, Fill, IndicatorSnapshot, Order,
-                                   Position, Strategy, Trade)
+                                   Position, Strategy, StrategySpec, Trade)
 from alpha.view.app import Application
 from alpha.view.model import Aggregator, Board, Latest, Pivot, Recent
 
@@ -124,7 +124,7 @@ class AlphaTrader:
         self.add_strategy(MANUAL_STRATEGY_ID, ManualStrategy(),
                           allocation=float("inf"))
 
-    def _ensure_default_recording_and_views(self, simul_mode: bool) -> None:
+    def _ensure_default_recording_and_views(self, db_name: str) -> None:
         """어떤 전략 조합이든 항상 똑같이 필요한 레코더/뷰 구독을 자체 등록한다.
 
         ★ build_trader() 자리에는 무엇만 남기나 ★
@@ -137,18 +137,20 @@ class AlphaTrader:
             여기 한 곳에 둔다 — build_trader() 를 고칠 때마다 매번
             그대로 옮겨 적어야 했던 보일러플레이트를 없앤다.
 
-        run_live/run_sim/run_backtest 가 알아서 부른다. 멱등이라 여러 번
-        불려도 두 번 등록되지 않는다."""
+        db_name : 데이터를 남길 sqlite 파일 이름(kis_config.DATA_DIR 밑).
+            어떤 파일을 쓸지는 "실행 경로가 곧 데이터 성격"이라 이 메서드가
+            판단하지 않는다 — 호출하는 run_live/run_sim/run_backtest 가
+            자기 상황(alpha_data.db/mock_data.db/mock_simul.db)을 그대로
+            넘긴다. 멱등이라 여러 번 불려도 두 번 등록되지 않는다."""
         if self._defaults_built:
             return
         self._defaults_built = True
 
         # ── 레코더 구독 — Engine.feed()/Trader 안에서만 만들어지는 데이터를
         #    어디에 저장할지. Tick/Quote는 build_recording(kis)가 kis_data.db에
-        #    원본(파싱 직후)을 이미 저장하지만, 여기서도 한 번 더 alpha_data.db에
-        #    남긴다 — Engine.feed()를 통과한(=전략에 실제로 배달된) 이벤트라서
-        #    kis_data.db 쪽과 타이밍/필터링이 다를 수 있다.
-        db_name = "alpha_data_sim.db" if simul_mode else "alpha_data.db"
+        #    원본(파싱 직후)을 이미 저장하지만, 여기서도 한 번 더 alpha_data.db
+        #    계열 파일에 남긴다 — Engine.feed()를 통과한(=전략에 실제로
+        #    배달된) 이벤트라서 kis_data.db 쪽과 타이밍/필터링이 다를 수 있다.
         alpha_sink = SqliteSink(str(kis_config.DATA_DIR / db_name))
 
         self.add_recording(Fill, alpha_sink, name="fill")
@@ -167,6 +169,23 @@ class AlphaTrader:
         # events.Notice — 실전(KiSEngine)/모의(SimBroker) 체결통보가 이제
         # 하나의 정규화된 타입이라 여기 한 번만 등록하면 둘 다 잡힌다.
         self.add_recording(events.Notice, alpha_sink, name="notice")
+
+        # StrategySpec — 전략마다 자체 이벤트가 없는 등록 정보(ticks/quotes/
+        # bars/allocation)를 실행 시각과 함께 한 행씩 남긴다. 이번 실행에
+        # 등록된 전략 수만큼만 put() 하고 끝난다(스트리밍이 아니다) —
+        # 그래도 Recorder 를 그대로 쓰는 이유와 실행마다 새 행이 쌓여야
+        # 하는 이유는 StrategySpec 독스트링 참고. batch=1 로 둬서 다음
+        # 이벤트를 기다리지 않고 바로 다음 flush 주기(내부 폴링)에 써진다
+        # — 표준 배치(500)로 두면 이 세션에 IndicatorSnapshot 등 다른
+        # 대량 채널이 없는 한 한동안 큐에만 머물 수 있다.
+        self.add_recording(StrategySpec, alpha_sink, name="strategy", batch=1)
+        for spec in self._specs:
+            self._recorder.put(StrategySpec(
+                dt=datetime.now(), strategy_id=spec["strategy_id"],
+                strategy_class=type(spec["strategy"]).__name__,
+                allocation=spec["allocation"], ticks=list(spec["ticks"]),
+                quotes=list(spec["quotes"]), bars=list(spec["bars"]),
+                warmup=spec["warmup"]))
 
         # ── 콘솔 뷰 구독 — 등록 순서가 곧 'v' 화면의 숫자키(1,2,3...) ──
         #    add_view() 가 아니라 _add_default_view() 를 쓴다 — build_trader()
@@ -286,7 +305,9 @@ class AlphaTrader:
         log.info("AlphaTrader.run_live 시작 — 전략 %d개, dry_run=%s", len(self._specs), dry_run)
         broker = KISBroker()
         self._ensure_manual_strategy()
-        self._ensure_default_recording_and_views(simul_mode=False)
+        # dry_run(--real 여부)과 무관하게 항상 alpha_data.db — 실계좌
+        # 웹소켓으로 받은 데이터라는 사실은 주문을 실제로 냈는지와 별개다.
+        self._ensure_default_recording_and_views(db_name="alpha_data.db")
 
         # Application(view_q)을 Engine보다 먼저 만든다 — Engine.feed()가
         # 만드는 봉/외부이벤트를 view_q로 바로 흘리려면 Engine 생성 시점에
@@ -321,13 +342,17 @@ class AlphaTrader:
 
         on_quit    : run_live 와 같다 — 콘솔 'q'는 데이터 소스만 세운다.
         ws         : run_live 와 같다 — 수동 주문 화면의 종목 번호 목록용.
-        simul_mode : True면 alpha_data_sim.db(테스트용 fake 피드), False면
-                     alpha_data.db — 호출자가 KiSEngine(simul_mode=...)에
-                     준 값과 같은 값을 그대로 줄 것(레코딩 파일이 갈린다)."""
+        simul_mode : True면 mock_simul.db(--simul, fake_kis_websocket로
+                     테스트), False면 mock_data.db(실제 KIS 웹소켓 시세 +
+                     가짜 주문) — 호출자가 KiSEngine(simul_mode=...)에 준
+                     값과 같은 값을 그대로 줄 것(레코딩 파일이 갈린다).
+                     live(alpha_data.db)와는 항상 별도 파일이라, 모의
+                     체결이 실전 기록에 섞이지 않는다."""
         log.info("AlphaTrader.run_sim 시작 — 전략 %d개, cash=%s", len(self._specs), cash)
         broker = SimBroker(fill_q=market_event_queue, cash=cash, **sim_broker_kwargs)
         self._ensure_manual_strategy()
-        self._ensure_default_recording_and_views(simul_mode=simul_mode)
+        db_name = "mock_simul.db" if simul_mode else "mock_data.db"
+        self._ensure_default_recording_and_views(db_name=db_name)
         app = self._apply_view(Application(on_quit=on_quit, ws=ws))
         eng = self._build_engine(broker, dry_run=False, view_q=app.view_q)   # 모의는 항상 가짜주문을 낸다
         app.ctx.engine = eng
@@ -350,8 +375,8 @@ class AlphaTrader:
         환경에 backtrader 가 없어도 되도록 여기서 지역 import 한다."""
         log.info("AlphaTrader.run_backtest 시작 — 전략 %d개, symbol=%s seconds=%d",
                 len(self._specs), symbol, seconds)
-        # 백테스트엔 kis_data_sim.db 개념이 없다 — alpha_data.db 고정.
-        self._ensure_default_recording_and_views(simul_mode=False)
+        # 백테스트엔 live/mock 구분이 없다 — alpha_data.db 고정.
+        self._ensure_default_recording_and_views(db_name="alpha_data.db")
         from alpha.broker.bt_broker import run_backtest as _run_backtest
         try:
             return _run_backtest(

@@ -147,6 +147,76 @@ class SinkClosedError(RuntimeError):
 # SQLite — 기존 방식(pandas to_sql) 그대로
 # ═══════════════════════════════════════════════════════════════════
 
+# 조회가 몰리는 컬럼 조합. write() 가 테이블을 처음 만들 때 이 중
+# 존재하는 컬럼 조합만 골라 인덱스를 건다(테이블마다 어떤 컬럼이 있는지
+# sink 는 미리 모르니, "있으면 걸고 없으면 조용히 건너뛴다"로 범용화).
+#
+# 등호로 거를 컬럼(symbol/strategy_id)을 앞에, 범위로 거를 시간 컬럼을
+# 뒤에 둔다 — 그래야 "그 종목만 골라서 그 안에서 시간순"이 인덱스 하나로
+# 끝난다(등호 매칭 + 그 안에서 이미 정렬된 상태로 범위 스캔). 인덱스가
+# 없으면 SQLite가 테이블 전체를 훑고 정렬까지 새로 하므로, 틱처럼 수백만
+# 행이 쌓이면 조회 하나에 몇 분씩 걸리는 게 바로 이 문제다.
+_INDEX_HINTS: tuple[tuple[str, ...], ...] = (
+    ("symbol", "dt"),                  # tick/quote/bar/fill/notice/indicator
+    ("strategy_id", "dt"),             # indicator를 strategy_id로도 자주 본다
+    ("strategy_id", "entry_dt"),       # trade/strategy
+    ("stock_code", "execution_time"),  # kis_data.db 원본(Execution)
+    ("stock_code", "business_hour"),   # kis_data.db 원본(OrderBook)
+)
+
+
+def _ensure_indexes(conn: sqlite3.Connection, table: str, columns) -> None:
+    """_INDEX_HINTS 중 이 테이블에 실제로 있는 컬럼 조합만 골라 인덱스를 건다."""
+    cols = set(columns)
+    for hint in _INDEX_HINTS:
+        if not cols.issuperset(hint):
+            continue
+        idx_name = f"idx_{table}_{'_'.join(hint)}"
+        col_list = ", ".join(hint)
+        try:
+            conn.execute(f'CREATE INDEX IF NOT EXISTS "{idx_name}" '
+                        f'ON "{table}" ({col_list})')
+        except sqlite3.Error:
+            log.warning("인덱스 생성 실패 %s(%s) — 조회는 되지만 느릴 수 있음",
+                       table, col_list, exc_info=True)
+
+
+def reindex_sqlite(path: str, tables: Optional[list] = None) -> None:
+    """이미 쌓여 있는(=이 sink가 만들지 않은) 기존 DB 파일에 인덱스를
+    나중에라도 걸고 싶을 때 한 번 불러 쓰는 유틸리티.
+
+    SqliteSink는 자기가 '테이블을 처음 만드는 순간'만 인덱스를 확인한다
+    (매 flush마다 확인하면 낭비다). 그래서 새 필드가 생겨 테이블을 새로
+    파는 게 아니라, 기존 파일을 계속 쓰면서 인덱스만 나중에 추가하고
+    싶을 때는 이 함수를 직접 부른다:
+
+        from alpha.recording.sinks import reindex_sqlite
+        reindex_sqlite("data/alpha_data.db")            # 전체 테이블
+        reindex_sqlite("data/alpha_data.db", ["tick"])   # 특정 테이블만
+
+    레코더가 돌고 있는 도중에 불러도 안전하다 — WAL 모드라 인덱스
+    생성(쓰기 트랜잭션)과 다른 프로세스의 읽기가 서로 안 막는다. 다만
+    수백만 행짜리 테이블이면 CREATE INDEX 자체가 수십 초~수 분 걸릴 수
+    있다(처음 한 번만)."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall()
+        all_tables = [r[0] for r in rows]
+        target = tables if tables is not None else all_tables
+        for table in target:
+            if table not in all_tables:
+                log.warning("reindex_sqlite: 테이블 없음 %s", table)
+                continue
+            cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{table}")')]
+            _ensure_indexes(conn, table, cols)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 class SqliteSink(Sink):
     """pandas 로 DataFrame 을 만들어 to_sql 로 저장한다.
 
@@ -161,6 +231,14 @@ class SqliteSink(Sink):
         recorder 는 별도 스레드라 매매에도 영향이 없다.
         정말 밀리면 이 클래스만 갈아끼우면 된다.
 
+    ■ 인덱스는 테이블이 처음 생길 때 한 번만 확인한다
+        pandas to_sql 은 인덱스를 안 만든다 — sqlite 기본은 rowid 순
+        전체 스캔이다. 그래서 여기서 _INDEX_HINTS 에 맞는 컬럼이 있으면
+        CREATE INDEX IF NOT EXISTS 를 걸어둔다. 이미 인덱스가 있는
+        기존 파일에 다시 붙여도(재시작) IF NOT EXISTS 라 안전하다 —
+        다만 '이미 쌓인 기존 테이블'에는 이 sink가 처음 만드는 게
+        아니라서 자동으로는 안 걸린다(아래 ensure_indexes 참고).
+
     ■ 스레드
         sqlite3 커넥션은 만든 스레드에서만 쓸 수 있다.
         recorder 스레드가 처음 write 할 때 열고 닫는 것도 그 스레드가 한다.
@@ -171,6 +249,7 @@ class SqliteSink(Sink):
         self.journal_mode = journal_mode
         self._conn: Optional[sqlite3.Connection] = None
         self._closed = False
+        self._indexed: set[str] = set()   # 이미 인덱스를 확인해본 테이블
 
     def _connect(self):
         # ★ 재접속을 허용하지 않는다 ★
@@ -199,6 +278,9 @@ class SqliteSink(Sink):
                 df[col] = df[col].map(_flat)
 
         df.to_sql(name, self._connect(), if_exists="append", index=False)
+        if name not in self._indexed:
+            _ensure_indexes(self._conn, name, df.columns)
+            self._indexed.add(name)
         self._conn.commit()
 
     def close(self) -> None:

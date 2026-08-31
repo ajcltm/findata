@@ -855,6 +855,39 @@ class AccountSnapshot:
 
 
 @dataclass(frozen=True)
+class StrategySpec:
+    """전략 하나가 이번 실행에서 어떤 데이터를 구독했는지 남겨두는 기록.
+
+    ■ 왜 필요한가
+        저장된 Trade/Fill 을 나중에 분석·플롯할 때, 그 전략이 어떤 데이터
+        규격(60초봉인지 틱인지, 어느 종목인지)을 보고 있었는지 알아야
+        같은 조건으로 차트를 그리거나 재현할 수 있다. Trade 자신은 체결
+        결과일 뿐 그걸 모른다 — AlphaTrader.add_strategy() 인자에만 있다.
+
+    ■ 한 번만 기록하는데도 append-only 로 쌓는 이유
+        strategy_id 는 재실행해도 이름이 같다("추세" 등). 그런데 코드가
+        바뀌면 같은 strategy_id 라도 이번 실행의 bars/ticks/quotes 가
+        지난 실행과 달라질 수 있다. '지금 설정'만 한 행에 덮어써 두면
+        예전 Trade 를 분석할 때 "그때는 어떤 설정이었는지"를 잃어버린다.
+        실행마다 dt 를 찍어 한 행씩 쌓아두면, 분석할 때
+        "Trade.entry_dt 이전 중 가장 최근 행"을 찾아 그 시점에 실제로
+        활성이었던 설정을 정확히 복원할 수 있다.
+
+    ■ IndicatorSnapshot/AccountSnapshot 과 같은 자리인 이유
+        add_strategy() 인자는 AlphaTrader 안에서만 존재하는 등록 정보라
+        자체 이벤트가 없다 — 그래서 여기서 기록용 타입을 새로 둔다.
+    """
+    dt: datetime                 # 이 실행에서 등록된 시각
+    strategy_id: str
+    strategy_class: str          # 클래스 이름 (SmaCrossATR 등)
+    allocation: float
+    ticks: list = field(default_factory=list)
+    quotes: list = field(default_factory=list)
+    bars: list = field(default_factory=list)     # [(symbol, seconds), ...]
+    warmup: int = 0
+
+
+@dataclass(frozen=True)
 class _IndSlot:
     """지표 하나 + 그 지표를 무엇으로 갱신할지.
 

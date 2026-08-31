@@ -63,6 +63,17 @@ class MarketEvent:
     dt: datetime                # ★ 파싱된 datetime. 문자열이 아니다
     raw: Any = None             # 원본 dataclass. 특수 필드가 필요할 때만 사용
 
+    # ★ dt 와 recv_dt 는 다른 시계다 ★
+    #   dt       거래소가 전문에 실어 보낸 시각(HHMMSS) — 초 밑이 없다.
+    #            이게 KIS 데이터 자체의 한계라 여기서는 못 고친다.
+    #   recv_dt  우리 로컬이 이 전문을 실제로 수신·파싱한 벽시계 시각
+    #            (kis_parser.KISParser.now(), 마이크로초까지 있다).
+    #            같은 초 안에 온 틱 여러 개를 순서·간격까지 구분하려면
+    #            (틱 단위 분석, 피드 지연 진단) 이 값을 써야 한다.
+    #   백테스트/워밍업처럼 실시간 수신이 아닌 경로에서 만든 이벤트는
+    #   recv_dt 가 없다(None) — 애초에 "언제 받았다"가 없는 데이터다.
+    recv_dt: Optional[datetime] = None
+
     @property
     def variant(self):
         """같은 kind 안에서 더 세분해야 할 때 쓰는 키. 기본은 구분 없음.
@@ -292,6 +303,19 @@ def _fo(v) -> Optional[float]:
         return None
 
 
+def _parse_recv(iso: str) -> Optional[datetime]:
+    """KISParser.now() 가 찍은 ISO 문자열("...T09:30:15.123456") → datetime.
+    비어있거나 형식이 이상하면 None — recv_dt 가 없다는 뜻으로 그대로 둔다
+    (dt 는 항상 필요해서 실패 시 00:00:00 으로라도 채우지만, recv_dt 는
+    없으면 그냥 없는 게 맞다 — 잘못된 값을 있는 것처럼 꾸미지 않는다)."""
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+
+
 def parse_hhmmss(hhmmss: str, on: Optional[date] = None) -> datetime:
     """KIS 시각 문자열("093015") → datetime.
 
@@ -309,8 +333,8 @@ def parse_hhmmss(hhmmss: str, on: Optional[date] = None) -> datetime:
         return datetime.combine(on, time(0, 0, 0))
 
 
-# 체결구분 코드 → 방향. KIS 는 1=매도체결, 5=매수체결로 보낸다.
-_EXEC_SIDE = {"1": "sell", "5": "buy"}
+# 체결구분 코드 → 방향. KIS 는 1:매수(+), 5:매도(-) 3:장전
+_EXEC_SIDE = {"1": "buy", "5": "sell"}
 
 
 def from_execution(e, on: Optional[date] = None) -> Tick:
@@ -323,6 +347,7 @@ def from_execution(e, on: Optional[date] = None) -> Tick:
         symbol=e.stock_code,
         dt=parse_hhmmss(e.execution_time, on),
         raw=e,                                  # 원본 통째로 보관
+        recv_dt=_parse_recv(e.datetime),        # 로컬 수신 시각(서브초 있음)
         price=_f(e.current_price),
         volume=_f(e.tick_volume),
         side=_EXEC_SIDE.get(str(e.exec_division).strip(), ""),
@@ -354,6 +379,7 @@ def from_orderbook(b, depth: int = 10, on: Optional[date] = None) -> Quote:
         symbol=b.stock_code,
         dt=parse_hhmmss(b.business_hour, on),
         raw=b,
+        recv_dt=_parse_recv(b.datetime),
         asks=series("ask_price_"),
         bids=series("bid_price_"),
         ask_sizes=series("ask_rsvp_"),
@@ -385,6 +411,7 @@ def from_notice(n, on: Optional[date] = None) -> Notice:
         symbol=n.STCK_SHRN_ISCD,
         dt=parse_hhmmss(n.STCK_CNTG_HOUR, on),
         raw=n,
+        recv_dt=_parse_recv(n.datetime),
         order_no=n.ODER_NO,
         rejected=(n.RFUS_YN == "Y"),
         filled_qty=_f(n.CNTG_QTY) if filled else 0.0,

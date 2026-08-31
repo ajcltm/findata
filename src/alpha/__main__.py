@@ -47,6 +47,7 @@ from alpha.alphatrader.alphatrader import AlphaTrader
 from alpha.recording.sinks import SqliteSink
 from alpha.strategy.dobi_watcher import DobiWatcher
 from alpha.strategy.indicator_watcher import IndicatorWatcher
+from alpha.strategy.microstructure_watcher import MicrostructureWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
 from alpha.trader.trading import IndicatorSnapshot
@@ -131,37 +132,57 @@ def build_trader() -> AlphaTrader:
                         allocation=5_000_000,
                         bars=[(SYMBOL[0], BAR_SECONDS)],
                         warmup=20)                  # 지표가 데워질 때까지 주문 차단
-    trader.add_strategy("호가감시", SpreadWatcher(),
-                        allocation=0,                # 주문 안 내므로 0
-                        quotes=SYMBOL)
+    # trader.add_strategy("호가감시", SpreadWatcher(),
+    #                     allocation=0,                # 주문 안 내므로 0
+    #                     quotes=SYMBOL)
 
     # 지표 뷰용 — 종목마다 독립된 인스턴스로 등록해야 값이 안 섞인다
     # (IndicatorWatcher 문서 참고). "추세"는 SYMBOL[0]을 이미 커버하지만
     # 매매용 인스턴스라 이 목적으로 재사용하지 않는다.
-    for symbol in SYMBOL:
-        trader.add_strategy(f"지표감시_{symbol}", IndicatorWatcher(symbol=symbol),
-                            allocation=0,
-                            bars=[(symbol, BAR_SECONDS)])
+    # for symbol in SYMBOL:
+    #     trader.add_strategy(f"지표감시_{symbol}", IndicatorWatcher(symbol=symbol),
+    #                         allocation=0,
+    #                         bars=[(symbol, BAR_SECONDS)])
 
     # DOBI(호가 기반)도 같은 이유로 종목마다 독립된 인스턴스가 필요하다.
     # 봉이 아니라 호가(quote)로 갱신되므로 bars= 가 아니라 quotes= 로
     # 구독한다 — DobiWatcher.setup() 참고.
+    # for symbol in SYMBOL:
+    #     trader.add_strategy(f"dobi감시_{symbol}", DobiWatcher(symbol=symbol),
+    #                         allocation=0,
+    #                         quotes=[symbol])
+
+    # 미시구조 지표(호가 순유출/잔량 불균형/체결 불균형)도 같은 이유로
+    # 종목마다 독립된 인스턴스가 필요하다. tfi 는 체결(tick)로, 나머지는
+    # 전부 호가(quote)로 갱신되므로 quotes/ticks 둘 다 구독한다 —
+    # MicrostructureWatcher.setup() 참고.
     for symbol in SYMBOL:
-        trader.add_strategy(f"dobi감시_{symbol}", DobiWatcher(symbol=symbol),
+        trader.add_strategy(f"미시구조_{symbol}", MicrostructureWatcher(symbol=symbol),
                             allocation=0,
-                            quotes=[symbol])
+                            quotes=[symbol], ticks=[symbol])
 
     # MACD는 라인이 셋이라 일반 지표판(단일 라인, line="value")과 축이
     # 다르다(symbol×line) — 그래서 별도 화면으로 뺀다. label="MACD"는
     # IndicatorWatcher.setup()에서 override로 고정해둔 값과 반드시 같아야
     # 한다 — AlphaTrader 는 어떤 지표를 쓰는지 모르므로 이 등록은 여기서만
     # 할 수 있다.
-    trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
-                    name="MACD", where={"label": "MACD"})
+    # trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+    #                 name="MACD", where={"label": "MACD"})
     # DOBI도 라인이 셋(imbalance/dobi/filtered)이라 같은 이유로 전용 화면.
     # label="DOBI"는 DobiWatcher.setup()의 override와 반드시 같아야 한다.
+    # trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+    #                 name="DOBI", where={"label": "DOBI"})
+    # BestQuoteFlow(ask_flow/bid_flow/ofi/ofi_norm/truncated),
+    # OFI_KF(level/slope/lead/obs_var/nis), DepletionRate(ask/bid/net) —
+    # 전부 라인이 여럿이라 같은 이유로 전용 화면. label 문자열은
+    # MicrostructureWatcher.setup()에서 name= 으로 고정해둔 값과 반드시
+    # 같아야 한다.
     trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
-                    name="DOBI", where={"label": "DOBI"})
+                    name="BestQuoteFlow", where={"label": "BestQuoteFlow"})
+    trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+                    name="OFI_KF", where={"label": "OFI_KF"})
+    trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
+                    name="DepletionRate", where={"label": "DepletionRate"})
     return trader
 
 def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
