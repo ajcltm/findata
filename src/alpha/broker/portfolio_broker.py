@@ -239,6 +239,17 @@ class PortfolioBroker:
         self._views[strategy_id] = v
         return v
 
+    def has_position(self, symbol: str) -> bool:
+        """등록된 전략 중 하나라도 이 종목에 포지션을 들고 있나.
+
+        ■ 왜 필요한가
+            유니버스 재계산(alpha/engine/universe.py)이 "이 종목 시세를
+            끊어도 되나"를 판단할 때 쓴다. 어느 전략이 이 종목을 보는지
+            (하나가 여러 종목을 관리할 수도 있으므로) 몰라도, 전 전략의
+            가상계좌를 훑으면 답이 나온다 — 전략 구조를 몰라도 안전하게
+            판단할 수 있는 유일한 방법이다."""
+        return any(not v.position(symbol).is_flat for v in self._views.values())
+
     # ───────── 소유권 조회 ─────────
     def owner_of(self, order_id: str) -> Optional[str]:
         """이 주문을 낸 전략 id. 없으면 None.

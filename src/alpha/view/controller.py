@@ -39,7 +39,6 @@ import shlex
 from alpha.view import model, view
 from alpha.strategy.manual import MANUAL_STRATEGY_ID
 from alpha.trader.trading import OrderStatus
-from kis import kis_websocket
 
 # 전역 키 짧은 설명. app.py 의 Router.GLOBAL_KEYS 와 짝이 맞아야 한다.
 GLOBAL_KEY_HINTS = {
@@ -162,7 +161,7 @@ class HomeController(Controller):
     """홈 — 대시보드.
 
     무엇이 얼마나 들어오고 있는지, 구독 화면이 뭐가 있는지 보여준다.
-    키는 종목 구독(s) 하나뿐이다."""
+    키는 종목 구독(s)/구독 해제(sc) 둘이다."""
 
     name, title = "home", "홈"
     view = staticmethod(view.home)
@@ -170,6 +169,20 @@ class HomeController(Controller):
     def __init__(self, ctx):
         super().__init__(model.Home(ctx))
         self.keymap["s"] = self._subscribe
+        self.keymap["sc"] = self._unsubscribe
+
+    def _universe(self, app):
+        """엔진에 유니버스 매니저가 꽂혀 있으면 그걸 돌려주고, 없으면 None.
+
+        ★ 왜 있으면 반드시 이걸 거쳐야 하나 ★
+          ws.subscribe_symbol() 을 콘솔에서 직접 부르면 시세만 들어오고
+          그 종목을 처리할 Strategy/지표가 없다(반쪽짜리 구독). 반대로
+          ws.unsubscribe_symbol() 을 직접 부르면 유니버스는 그 종목이
+          여전히 활성인 줄 알고 있는데 시세만 끊겨 지표가 조용히 멈춘다.
+          유니버스가 있으면 request_add/remove() 가 ws 구독과
+          Engine.add()/remove() 를 한 자리에서 같이 처리해준다."""
+        eng = app.ctx.engine
+        return getattr(eng, "universe", None) if eng is not None else None
 
     def _subscribe(self, app, arg):
         """종목 구독"""
@@ -181,14 +194,61 @@ class HomeController(Controller):
             app.ctx.flash("웹소켓이 연결되지 않았습니다.")
             return
 
+        universe = self._universe(app)
+        if universe is not None:
+            # request_add() 는 큐에 넣기만 하고 바로 반환한다(스레드 안전) —
+            # 실제 ws 구독 + Engine.add() 는 다음 유니버스 재계산 때(대략
+            # 1초 이내) LiveRunner 스레드에서 실행된다. desired_fn() 이
+            # 이 종목을 계속 안 돌려주면 다음 정기 재계산 때 다시 빠질 수
+            # 있다는 점은 알려준다.
+            universe.request_add(arg)
+            app.ctx.flash(f"{arg} 유니버스 추가 요청 — 곧 전략과 함께 반영됩니다 "
+                          f"(desired_fn 이 계속 이 종목을 안 돌려주면 다음 정기 재계산 때 다시 빠질 수 있음)")
+            return
+
+        # ★ 유니버스가 없을 때만 ws를 직접 건드린다 ★
+        #   이 경로는 시세만 구독되고 어떤 전략/지표도 그 종목을 보지
+        #   않는다 — build_universe() 없이 옛 방식으로 돌리는 경우의
+        #   대체 수단일 뿐이다.
+        #
         # ★ 여기서 직접 부르면 입력이 멈춘다 ★
         #   구독 요청은 네트워크를 탄다. app.submit 이 워커 스레드에서
         #   돌리고, 끝나면 세 번째 인자(콜백)를 렌더 스레드에서 부른다.
         app.submit(
             f"{arg} 구독",                                      # 로그용 이름
-            lambda: app.ctx.ws._subscribe_one(                  # 워커에서 실행
-                kis_websocket.Subscription(app.ctx.ws.tr_price, arg)),
-            lambda _: app.ctx.flash(f"{arg} 구독 완료"))        # 렌더에서 실행
+            lambda: app.ctx.ws.subscribe_symbol(arg),           # 워커에서 실행
+            lambda ok: app.ctx.flash(
+                (f"{arg} 시세만 구독 완료" if ok else f"{arg} 목록에 추가됨(다음 재연결 때 반영)")
+                + " — 유니버스가 없어 전략/지표는 안 붙습니다"))
+
+    def _unsubscribe(self, app, arg):
+        """종목 구독 해제"""
+        if not arg:
+            app.ctx.flash("사용법: sc 005930")
+            return
+        if app.ctx.ws is None:
+            app.ctx.flash("웹소켓이 연결되지 않았습니다.")
+            return
+
+        universe = self._universe(app)
+        if universe is not None:
+            # 포지션이 남아있으면 유니버스가 즉시는 못 떼고 청산 대기로
+            # 돌린다(신규진입만 차단, 시세·지표는 유지) — rebalance() 와
+            # 완전히 같은 규칙이라 콘솔에서 강제로 위험하게 끊을 수 없다.
+            universe.request_remove(arg)
+            app.ctx.flash(f"{arg} 유니버스 제거 요청 — 곧 반영됩니다 "
+                          f"(포지션이 남아있으면 청산될 때까지 시세는 유지됩니다)")
+            return
+
+        # KIS 실시간 시세는 tr_type="2"로 같은 tr_id/tr_key를 다시 보내면
+        # 해제된다(공식 문서 H0STCNT0 설명 참고) — 유니버스가 없을 때만
+        # 쓰는 대체 수단이라, 이 경로는 포지션 여부를 전혀 모른다.
+        app.submit(
+            f"{arg} 구독해제",
+            lambda: app.ctx.ws.unsubscribe_symbol(arg),
+            lambda ok: app.ctx.flash(
+                (f"{arg} 시세 구독 해제 완료" if ok else f"{arg} 목록에서 제거됨(연결이 없어 즉시 반영은 안 됨)")
+                + " — 유니버스가 없어 포지션 확인 없이 바로 끊었습니다"))
 
 
 class RealDataController(PagedKeys, Controller):

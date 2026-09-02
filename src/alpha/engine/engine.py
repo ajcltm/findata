@@ -178,6 +178,14 @@ class Engine:
         # — '엔진을 거치는 것'의 저장·뷰가 이 한 곳(Engine)에서 일원화된다.
         # None 이면(백테스트 등) 아무 데도 안 흘린다.
         self.view_q = view_q
+        # start() 가 한 번 돈 뒤에는 add() 가 새 슬롯을 그 자리에서 바로
+        # 기동한다(동적 유니버스처럼 실행 중에 전략을 더할 때 필요하다) —
+        # start() 전에 add() 만 쌓아두는 통상적인 조립 순서는 그대로다.
+        self._started = False
+        # 동적 유니버스 재계산기(선택). None 이면 아무 일도 안 한다 —
+        # 이 필드를 넣는다고 기존 사용처가 바뀌지 않는다. 실제 배선은
+        # alpha/engine/universe.py 의 UniverseManager 참고.
+        self.universe = None
 
     # ───────── 등록 ─────────
     def add(self, strategy_id: str, strategy: Strategy,
@@ -239,6 +247,44 @@ class Engine:
         # 요구량 대비 부족하면 경고. 200일선을 쓰면서 100봉만 주면
         # 장 시작 후 100봉을 더 기다려야 하는데, 조용히 그렇게 된다.
         self._check_history(strategy_id, strategy, slot.history)
+
+        # ★ 엔진이 이미 돌고 있으면 이 슬롯도 바로 기동한다 ★
+        #   보통은 add() 를 전부 부른 뒤 한 번에 start() 하지만(부팅 순서),
+        #   동적 유니버스처럼 실행 중에 전략을 더하는 경우 start() 가 다시
+        #   불릴 일이 없다 — 여기서 개별 기동을 안 해주면 이 Trader는
+        #   영원히 _started=False 로 남아 feed() 가 매번 조용히 무시한다
+        #   (trading.py Trader.feed() 의 '① 시작 전이면 무시' 참고).
+        if self._started:
+            slot.trader.start(history=slot.history)
+        return slot
+
+    def remove(self, strategy_id: str) -> Optional[Slot]:
+        """전략 하나를 뗀다 — 동적 유니버스에서 종목/전략을 빼거나, 계좌를
+        재구성할 때 쓴다.
+
+        ★ 무엇을 하고 무엇을 안 하나 ★
+          라우터 구독을 끊어서 앞으로 오는 이벤트를 더 이상 안 받게 하고,
+          Trader.stop() 으로 상태를 저장한 뒤 봉/틱 배달을 멈춘다.
+
+          ★ 같은 strategy_id 로 나중에 다시 add() 하면? ★
+            PortfolioBroker.view() 는 항상 새 StrategyBroker 를 만든다
+            (기존 걸 재사용하지 않는다) — 그래서 '이어받기'는 객체가
+            아니라 state_dir 의 상태 파일(strategy_id.json)로 된다.
+            AlphaTrader(state_dir=...) 를 지정해뒀다면, remove() 가
+            Trader.stop() 에서 그 파일에 현금·포지션을 저장해두고,
+            나중에 같은 strategy_id 로 add() 하면 Trader.start() 가 그걸
+            읽어 복원한다. state_dir 를 안 줬다면 매번 배정자본
+            그대로(allocation) 새로 시작한다 — 동적 유니버스를 쓸
+            거면 state_dir 를 반드시 지정할 것.
+
+        모르는 strategy_id 를 줘도 조용히 None 을 준다 — 이미 빠진
+        종목을 유니버스 재계산기가 또 빼려 해도 안전해야 한다."""
+        slot = self.slots.pop(strategy_id, None)
+        if slot is None:
+            return None
+        self.router.unregister(slot.trader)
+        slot.trader.stop()
+        log.info("전략 제거: %s", strategy_id)
         return slot
 
     def _check_history(self, sid: str, strategy: Strategy, history: list):
@@ -268,6 +314,7 @@ class Engine:
         override = history or {}
         for sid, slot in self.slots.items():
             slot.trader.start(history=override.get(sid, slot.history))
+        self._started = True    # 이 뒤로 add() 되는 슬롯은 개별적으로 바로 start() 된다
         log.info("엔진 기동 — 전략 %d개, dry_run=%s", len(self.slots), self.dry_run)
 
     def stop(self):
@@ -342,13 +389,19 @@ class Engine:
                 self.feed(bar)               # 재귀 아님 — bar 는 tick 이 아니다. view_q/recorder도 여기서 같이 탄다
 
     def feed_timer(self, now: datetime):
-        """주기 호출(1초 등). 세 가지를 한다.
+        """주기 호출(1초 등). 네 가지를 한다.
             ① 틱이 끊긴 봉 강제 마감 — feed()를 거치지 않으므로 recorder/view_q를
                직접 챙긴다(브로커의 on_market은 원래도 이 경로에서 안 불렀다)
             ② 전략의 on_timer — 종가청산, 미체결 정정 등 시각 기반 로직
             ③ 포지션판 갱신 — last_price 가 실시간이므로 체결 사이에도
                가격이 움직이면 갱신해야 한다(체결 시점에만 흘리면 그
-               사이 가격변동이 화면에 하나도 안 보인다)"""
+               사이 가격변동이 화면에 하나도 안 보인다)
+            ④ 유니버스 재계산(등록돼 있으면) — 여기서 부르는 이유는
+               add()/remove() 가 self.slots/router 를 건드리는데, 그게
+               feed()/feed_timer() 를 부르는 스레드(LiveRunner)와 같은
+               스레드에서 일어나야 락 없이도 안전하기 때문이다. now 는
+               브로커 시계(주입된 시각)라 여기서도 그대로 쓴다 — 벽시계를
+               새로 참조하지 않는다."""
         for bar in self.bars.flush(now):
             if self.recorder is not None:
                 self.recorder.put(bar)
@@ -358,6 +411,8 @@ class Engine:
         for slot in self.slots.values():
             slot.trader.feed_timer(now)
         self._push_positions()
+        if self.universe is not None:
+            self.universe.maybe_rebalance(now)
 
     def feed_fill(self, fill: Fill):
         """체결. 주인 전략을 찾아 넘기기만 한다.

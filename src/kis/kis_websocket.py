@@ -118,6 +118,13 @@ class KisFeed:
         self._crypto: dict[str, tuple[str, str]] = {}
         self._last_bad_log: dict[str, float] = {}
 
+        # 지금 열려있는 연결 객체. subscribe_symbol()/unsubscribe_symbol() 이
+        # 다른 스레드에서 실시간으로 구독을 추가/해지할 때 이걸 통해 보낸다.
+        # 세션 밖(연결 안 됐거나 재연결 중)이면 None — 그 경우엔 아래 두
+        # 메서드가 price_codes/orderbook_codes 만 갱신해두고, 다음
+        # _subscribe_all() 이 알아서 새로 구독한다.
+        self._ws_conn = None
+
     def get_approval_key(self):
         url = f"{kis_config.domain}/oauth2/Approval"
         headers = {"content-type": "application/json"}
@@ -182,6 +189,7 @@ class KisFeed:
         async with self._connect(
             self.ws_url, ping_interval=None, close_timeout=5,
         ) as ws:
+            self._ws_conn = ws          # subscribe_symbol() 등이 이걸로 실시간 전송한다
             self.log.info("WebSocket 연결됨: %s", self.ws_url)
 
             recv_task = asyncio.create_task(self._recv_loop(ws), name="recv")
@@ -202,6 +210,7 @@ class KisFeed:
                     t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 self._fail_pending_acks()
+                self._ws_conn = None    # 연결이 끝났다 — 이 뒤로는 다음 세션에 맡긴다
 
     # ── 구독 (ACK 대기) ──────────────────────────────────────────
     async def _subscribe_all(self, ws) -> None:
@@ -212,15 +221,17 @@ class KisFeed:
                                  sub.tr_id, sub.tr_key)
             await asyncio.sleep(self.SUBSCRIBE_GAP)
 
-    async def _subscribe_one(self, ws, sub: Subscription) -> bool:
+    async def _subscribe_one(self, ws, sub: Subscription, tr_type: str = "1") -> bool:
+        """tr_type: "1" 등록 / "2" 해지. 둘 다 같은 ACK 매칭 방식이라 하나로 합쳤다."""
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._ack[sub.ack_key] = fut
         try:
-            await ws.send(self.make_subscribe_msg("1", sub))
+            await ws.send(self.make_subscribe_msg(tr_type, sub))
             self._sub_status[sub.ack_key] = "대기 중"
             await asyncio.wait_for(fut, timeout=self.ACK_TIMEOUT)
-            self.log.info("구독 완료: %s %s", sub.tr_id, sub.tr_key)
+            self.log.info("%s: %s %s", "구독 완료" if tr_type == "1" else "구독 해지 완료",
+                         sub.tr_id, sub.tr_key)
             return True
         except asyncio.TimeoutError:
             return False
@@ -230,6 +241,90 @@ class KisFeed:
     def subscription_status(self) -> list[tuple[str, str, str]]:
         """UI가 읽어가는 창구. 복사본을 준다."""
         return [(tr, key, st) for (tr, key), st in self._sub_status.items()]
+
+    # ── 실행 중 구독 추가/해지 (동적 유니버스용) ──────────────────
+    def subscribe_symbol(self, symbol: str, price: bool = True, orderbook: bool = True,
+                         timeout: float = ACK_TIMEOUT + 1.0) -> bool:
+        """실행 중에 종목 하나를 추가로 구독한다. LiveRunner 등 다른 스레드에서
+        불러도 안전하다 — 실제 전송은 웹소켓 루프(이 인스턴스의 이벤트루프)에서
+        실행되도록 넘긴다.
+
+        ★ 순서가 중요하다 ★
+          price_codes/orderbook_codes 를 먼저 갱신해서, 지금 당장 연결이
+          끊겨 있거나 하필 재연결 중이어도 '다음 접속'에서 반드시 이
+          종목이 같이 구독되게 한다(_subscribe_all() 이 이 리스트를 그때
+          다시 읽는다). 그다음에야 지금 연결에 실시간으로 얹는 걸
+          시도한다 — 연결이 없으면 이 부분만 건너뛰고 False 를 준다
+          (리스트는 이미 반영됐으므로 데이터를 영영 놓치는 건 아니다).
+
+        반환값: 지금 이 순간 라이브 세션에 실제로 반영됐는지. False 라고
+        실패한 게 아니라 '다음 재연결 때 반영'인 경우가 대부분이다."""
+        added = False
+        if price and symbol not in self.price_codes:
+            self.price_codes.append(symbol)
+            added = True
+        if orderbook and symbol not in self.orderbook_codes:
+            self.orderbook_codes.append(symbol)
+            added = True
+
+        total = len(self.price_codes) + len(self.orderbook_codes) + 1  # +1 체결통보
+        if total > self.MAX_SUBSCRIPTIONS:
+            self.log.warning("구독 한도 초과 위험 — 현재 %d건(한도 %d). %s 를 더한 뒤 "
+                             "재연결이 나면 세션이 계속 실패합니다 — 종목을 줄이세요.",
+                             total, self.MAX_SUBSCRIPTIONS, symbol)
+
+        loop = self._loop
+        if not added or loop is None or not loop.is_running() or self._ws_conn is None:
+            return False    # 리스트에는 반영됨 — 지금 세션이 없을 뿐이다
+
+        async def _do() -> bool:
+            ok = True
+            if price:
+                ok = await self._subscribe_one(self._ws_conn,
+                                               Subscription(self.tr_price, symbol)) and ok
+            if orderbook:
+                ok = await self._subscribe_one(self._ws_conn,
+                                               Subscription(self.tr_orderbook, symbol)) and ok
+            return ok
+
+        try:
+            return asyncio.run_coroutine_threadsafe(_do(), loop).result(timeout=timeout)
+        except Exception:
+            self.log.exception("%s 실시간 구독 반영 실패 — 다음 재연결 때 다시 시도됩니다", symbol)
+            return False
+
+    def unsubscribe_symbol(self, symbol: str, price: bool = True, orderbook: bool = True,
+                           timeout: float = ACK_TIMEOUT + 1.0) -> bool:
+        """구독을 뗀다. subscribe_symbol() 과 대칭 — 리스트에서 먼저 지워
+        재연결 때 다시 안 붙게 하고, 그다음 지금 연결에도 해지 메시지를 보낸다."""
+        removed = False
+        if price and symbol in self.price_codes:
+            self.price_codes.remove(symbol)
+            removed = True
+        if orderbook and symbol in self.orderbook_codes:
+            self.orderbook_codes.remove(symbol)
+            removed = True
+
+        loop = self._loop
+        if not removed or loop is None or not loop.is_running() or self._ws_conn is None:
+            return False
+
+        async def _do() -> bool:
+            if price:
+                await self._subscribe_one(self._ws_conn, Subscription(self.tr_price, symbol),
+                                          tr_type="2")
+                self._sub_status.pop((self.tr_price, symbol), None)
+            if orderbook:
+                await self._subscribe_one(self._ws_conn, Subscription(self.tr_orderbook, symbol),
+                                          tr_type="2")
+                self._sub_status.pop((self.tr_orderbook, symbol), None)
+            return True
+
+        try:
+            return asyncio.run_coroutine_threadsafe(_do(), loop).result(timeout=timeout)
+        except Exception:
+            self.log.exception("%s 실시간 구독해지 반영 실패(목록에서는 이미 제거됨)", symbol)
+            return False
 
     def _fail_pending_acks(self) -> None:
         for fut in self._ack.values():

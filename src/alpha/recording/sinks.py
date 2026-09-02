@@ -158,6 +158,15 @@ class SinkClosedError(RuntimeError):
 # 행이 쌓이면 조회 하나에 몇 분씩 걸리는 게 바로 이 문제다.
 _INDEX_HINTS: tuple[tuple[str, ...], ...] = (
     ("symbol", "dt"),                  # tick/quote/bar/fill/notice/indicator
+    ("symbol", "label", "dt"),         # indicator를 symbol+label로 거의 항상 본다
+                                        # (indicators()/indicator_pivot()) — (symbol,dt)
+                                        # 인덱스만 있으면 symbol로 좁힌 뒤 label은 행마다
+                                        # 원본 테이블을 다시 찾아가 확인해야 해서(북마크
+                                        # 조회), symbol 안에서 label별 비중이 작을수록
+                                        # 오히려 인덱스 없이 훑는 것보다 느려질 수 있다
+                                        # (18M행에서 실측: symbol만 743k행 1.7초인데
+                                        # 그 중 label 하나 더 거르는 데 19초 추가).
+    ("symbol", "seconds", "dt"),       # bar를 symbol+seconds(봉 주기)로 거의 항상 본다
     ("strategy_id", "dt"),             # indicator를 strategy_id로도 자주 본다
     ("strategy_id", "entry_dt"),       # trade/strategy
     ("stock_code", "execution_time"),  # kis_data.db 원본(Execution)

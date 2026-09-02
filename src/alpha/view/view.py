@@ -81,7 +81,8 @@ def home(m, width: int) -> list[str]:
     else:
         out += ["", " 구독된 화면이 없습니다. ctx.feed.subscribe(...) 로 등록하세요."]
 
-    out += ["", " [r] 수신로그   [o] 주문내역   [v] 구독화면   [s] 종목구독 (s 005930)"]
+    out += ["", " [r] 수신로그   [o] 주문내역   [v] 구독화면   "
+                "[s] 종목구독(s 005930)   [sc] 구독해제(sc 005930)"]
     return out
 
 

@@ -8,23 +8,40 @@
     python -m alpha backtest [--csv]  백테스트 (CSV 없으면 합성 데이터)
 
 ■ 조립 순서 (live / sim)
-    ① KiSEngine 생성        — 구독 종목 + 웹소켓 설정만. 아직 아무것도 안 켜진다
-    ② AlphaTrader 생성 + 전략 등록
-    ③ trader.run_live/run_sim(kis.market_event_queue) — 소비 스레드 기동
-       (이 시점엔 큐가 비어 있어도 된다 — kis.run() 이 나중에 채운다)
-    ④ kis.run(...) — 파싱/이벤트 스레드 + 웹소켓 기동. 메인 스레드를 블록한다
+    ① 유니버스(대상 종목 리스트) 확정        — 지금은 SYMBOL 고정 리스트
+    ② KiSEngine 생성                        — 그 리스트로 바로 구독 시작
+    ③ AlphaTrader 생성 + setup_core() (유니버스와 무관한 고정 등록)
+    ④ trader.run_live/run_sim(...)          — build_trader/universe 를 넘기면
+       AlphaTrader 가 그 안에서 build_trader(trader, symbols) 를 한 번 불러
+       유니버스만큼 등록하고, 소비 스레드도 기동한다
+    ⑤ kis.run(...) — 파싱/이벤트 스레드 + 웹소켓 기동. 메인 스레드를 블록한다
 
-■ 세 실행 경로가 같은 전략 조합을 쓴다
-    build_trader() 하나만 세 경로 모두에 넘긴다. 그래야 백테스트 성과와
-    실전/모의 성과가 같은 조건을 재는 것이 된다.
+■ 두 함수로 나뉜다 — "고정"과 "유니버스"
+    setup_core(trader)          유니버스와 무관하게 한 번만 등록하는 것
+                                (SYMBOL[0] 전용 "추세", 라인이 여럿인
+                                지표의 전용 뷰 등).
+    build_trader(trader, symbols)  종목 리스트를 받아 그 종목들에 대해서만
+                                등록한다. 몸통은 전적으로 자유 — 종목마다
+                                인스턴스 하나로 하든, 여러 종목을 전략
+                                하나가 다 보든, cash를 어떻게 나누든
+                                alpha/engine/universe.py 는 관여하지 않는다.
+                                최초엔 전체 유니버스로 한 번, 나중에
+                                유니버스가 바뀌면(universe_schedule) 새로
+                                들어온 종목만으로 다시 불린다 — 이미 있는
+                                종목은 절대 다시 안 건드린다.
+
+■ 유니버스를 나중에 실제로 바꾸고 싶으면
+    지금은 universe=SYMBOL(정적 리스트), universe_schedule=None(자동
+    재계산 없음, 콘솔 s/sc로 수동 추가/제거만 가능) 으로 되어 있다.
+    거래량 상위 N종목처럼 실제로 바꾸려면:
+        universe=get_universe (인자 없이 list[str] 을 돌려주는 함수)
+        universe_schedule=UniverseSchedule(interval=7200)  # 또는 at=["12:00"]
+    둘만 바꿔 끼우면 된다 — build_trader()/setup_core() 는 그대로다.
 
 ■ 레코더 구독 / 뷰 구독은 이 파일과 alphatrader.py로 나뉜다
     표준(Fill/Trade/단일 라인 지표/Bar/Tick/Quote/Notice 레코딩과 그 뷰,
     포지션/주문/계좌판)은 AlphaTrader가 run_live/run_sim/run_backtest
     안에서 자체 등록한다(alphatrader.py의 _ensure_default_recording_and_views).
-    이 파일의 build_trader() 에는 프로젝트마다 달라지는 것만 남는다 —
-    전략 조합, 그리고 MACD처럼 라인이 여럿인 지표의 전용 뷰(그 지표
-    구현을 아는 자리에서만 label을 알 수 있어서 일반화가 안 된다).
     build_recording() 은 kis.recorder(원본 틱)를 kis_data(_sim).db 에
     등록한다 — live/sim 둘 다 그대로 쓴다(백테스트는 KiSEngine이 없어서
     build_recording() 은 안 쓴다).
@@ -44,6 +61,7 @@ from kis import kis_parser
 from kis.kis_engine import KiSEngine
 
 from alpha.alphatrader.alphatrader import AlphaTrader
+from alpha.engine.universe import UniverseSchedule
 from alpha.recording.sinks import SqliteSink
 from alpha.strategy.dobi_watcher import DobiWatcher
 from alpha.strategy.indicator_watcher import IndicatorWatcher
@@ -119,15 +137,11 @@ def setup_logging(mode: str, verbose: bool) -> Path:
 # 1. 전략 + 레코더 + 뷰 등록 — 세 실행 경로의 유일한 공통 정의
 # ═══════════════════════════════════════════════════════════════════
 
-def build_trader() -> AlphaTrader:
-    """이 프로젝트 전용인 것만 남긴다 — 전략 조합, 그리고 MACD처럼 라인이
-    여럿인 지표의 전용 뷰(그 지표 구현을 아는 자리에서만 label을 알 수
-    있다). 그 외 표준 레코딩/뷰(Fill/Trade/단일 라인 지표/Bar/Tick/Quote/
-    Notice, 포지션/주문/계좌판)는 AlphaTrader 가 run_live/run_sim/
-    run_backtest 안에서 자체 등록한다(alphatrader.py의
-    _ensure_default_recording_and_views 참고)."""
-    trader = AlphaTrader()
-
+def setup_core(trader: AlphaTrader) -> None:
+    """유니버스와 무관하게 한 번만 등록하는 것 — 고정 전략 + 라인이
+    여럿인 지표의 전용 뷰. build_trader() 처럼 유니버스 재계산 때마다
+    다시 불리지 않는다(재계산이 불렀다간 "추세"가 두 번 등록되거나
+    같은 이름의 뷰 패널이 중복 생긴다)."""
     trader.add_strategy("추세", SmaCrossATR(symbol=SYMBOL[0]),
                         allocation=5_000_000,
                         bars=[(SYMBOL[0], BAR_SECONDS)],
@@ -136,54 +150,41 @@ def build_trader() -> AlphaTrader:
     #                     allocation=0,                # 주문 안 내므로 0
     #                     quotes=SYMBOL)
 
-    # 지표 뷰용 — 종목마다 독립된 인스턴스로 등록해야 값이 안 섞인다
-    # (IndicatorWatcher 문서 참고). "추세"는 SYMBOL[0]을 이미 커버하지만
-    # 매매용 인스턴스라 이 목적으로 재사용하지 않는다.
-    # for symbol in SYMBOL:
-    #     trader.add_strategy(f"지표감시_{symbol}", IndicatorWatcher(symbol=symbol),
-    #                         allocation=0,
-    #                         bars=[(symbol, BAR_SECONDS)])
-
-    # DOBI(호가 기반)도 같은 이유로 종목마다 독립된 인스턴스가 필요하다.
-    # 봉이 아니라 호가(quote)로 갱신되므로 bars= 가 아니라 quotes= 로
-    # 구독한다 — DobiWatcher.setup() 참고.
-    # for symbol in SYMBOL:
-    #     trader.add_strategy(f"dobi감시_{symbol}", DobiWatcher(symbol=symbol),
-    #                         allocation=0,
-    #                         quotes=[symbol])
-
-    # 미시구조 지표(호가 순유출/잔량 불균형/체결 불균형)도 같은 이유로
-    # 종목마다 독립된 인스턴스가 필요하다. tfi 는 체결(tick)로, 나머지는
-    # 전부 호가(quote)로 갱신되므로 quotes/ticks 둘 다 구독한다 —
-    # MicrostructureWatcher.setup() 참고.
-    for symbol in SYMBOL:
-        trader.add_strategy(f"미시구조_{symbol}", MicrostructureWatcher(symbol=symbol),
-                            allocation=0,
-                            quotes=[symbol], ticks=[symbol])
-
-    # MACD는 라인이 셋이라 일반 지표판(단일 라인, line="value")과 축이
-    # 다르다(symbol×line) — 그래서 별도 화면으로 뺀다. label="MACD"는
-    # IndicatorWatcher.setup()에서 override로 고정해둔 값과 반드시 같아야
-    # 한다 — AlphaTrader 는 어떤 지표를 쓰는지 모르므로 이 등록은 여기서만
-    # 할 수 있다.
-    # trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
-    #                 name="MACD", where={"label": "MACD"})
-    # DOBI도 라인이 셋(imbalance/dobi/filtered)이라 같은 이유로 전용 화면.
-    # label="DOBI"는 DobiWatcher.setup()의 override와 반드시 같아야 한다.
-    # trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
-    #                 name="DOBI", where={"label": "DOBI"})
     # BestQuoteFlow(ask_flow/bid_flow/ofi/ofi_norm/truncated),
     # OFI_KF(level/slope/lead/obs_var/nis), DepletionRate(ask/bid/net) —
-    # 전부 라인이 여럿이라 같은 이유로 전용 화면. label 문자열은
-    # MicrostructureWatcher.setup()에서 name= 으로 고정해둔 값과 반드시
-    # 같아야 한다.
+    # 라인이 여럿이라 일반 지표판(단일 라인, line="value")과 축이 다르다
+    # — 그래서 전용 화면으로 뺀다. label 문자열은 MicrostructureWatcher.
+    # setup()에서 name= 으로 고정해둔 값과 반드시 같아야 한다. build_trader()
+    # 가 나중에 몇 번을 다시 불려 종목이 늘어도, 이 뷰는 label 로만 걸러서
+    # 모든 종목의 값을 한 화면에 계속 모아 보여준다 — 다시 등록할 필요 없다.
     trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
                     name="BestQuoteFlow", where={"label": "BestQuoteFlow"})
     trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
                     name="OFI_KF", where={"label": "OFI_KF"})
     trader.add_view(IndicatorSnapshot, model.Pivot(index="symbol", columns="line"),
                     name="DepletionRate", where={"label": "DepletionRate"})
-    return trader
+    # MACD/DOBI 를 다시 쓰게 되면 같은 패턴으로 여기 추가할 것
+    # (label="MACD"/"DOBI" — IndicatorWatcher/DobiWatcher.setup()의
+    # override와 반드시 같아야 한다).
+
+
+def build_trader(trader: AlphaTrader, symbols: list[str]) -> None:
+    """종목 리스트를 받아 그 종목들에 대해서만 등록한다 — 몸통은 전적으로
+    자유다(종목마다 인스턴스 하나로 하든, 여러 종목을 전략 하나가 다
+    보든, cash를 어떻게 나누든 alpha/engine/universe.py 는 관여하지
+    않는다). AlphaTrader.run_live/run_sim 이 최초엔 전체 유니버스로 한
+    번, 유니버스가 바뀌면(universe_schedule) 새로 들어온 종목만으로
+    다시 부른다 — 이미 등록된 종목은 여기 절대 다시 안 들어온다.
+
+    미시구조 지표(호가 순유출/잔량 불균형/체결 불균형)는 종목마다
+    독립된 인스턴스가 필요하다(MicrostructureWatcher.setup() 참고 —
+    한 인스턴스가 여러 종목을 받으면 지표값이 섞인다). tfi 는 체결
+    (tick)로, 나머지는 호가(quote)로 갱신되므로 둘 다 구독한다."""
+    for symbol in symbols:
+        trader.add_strategy(f"미시구조_{symbol}", MicrostructureWatcher(symbol=symbol),
+                            allocation=0,             # 관찰 전용 — 주문을 안 낸다
+                            quotes=[symbol], ticks=[symbol])
+
 
 def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
     """KiSEngine이 만드는 원본 틱/이벤트를 어디에 저장할지 등록한다.
@@ -205,16 +206,33 @@ def build_recording(kis: KiSEngine, simul_mode: bool) -> None:
 def run_live(dry_run: bool):
     simul_mode = False
     log.info("run_live 시작 (dry_run=%s)", dry_run)
-    kis = KiSEngine(price_codes=SYMBOL, orderbook_codes=SYMBOL, simul_mode=simul_mode)
+    # 유니버스를 먼저(동기적으로) 확정하고, 그 리스트로 KiSEngine을 바로
+    # 구독시킨다 — 예전 방식 그대로다. 지금은 SYMBOL 고정 리스트라 그냥
+    # 그대로 쓴다(list()로 복사 — trader.run_live()에 넘기는 universe와
+    # 같은 객체를 공유해도 되지만, 실수로 나중에 SYMBOL을 in-place로
+    # 바꿔 쓰는 코드가 생겨도 여기 구독 목록엔 영향이 없게 분리해둔다).
+    symbols = list(SYMBOL)
+    kis = KiSEngine(price_codes=symbols, orderbook_codes=symbols, simul_mode=simul_mode)
     build_recording(kis, simul_mode=simul_mode)
-    trader = build_trader()
+
+    trader = AlphaTrader()
+    setup_core(trader)                       # 유니버스와 무관한 고정 등록
 
     # on_quit=kis.stop : 콘솔에서 'q'를 누르면 웹소켓만 세운다.
     # 그래야 아래 kis.run()의 블로킹이 풀리고, 다운스트림 드레인·flush는
     # 여기(메인 스레드)에서 kis.run() 리턴 뒤에 마저 처리한다 —
     # 뷰가 뜬 daemon 스레드에서 다 끝내려 하면, 메인 스레드가 먼저 빠져나가
     # daemon 스레드가 중간에 죽어 마지막 몇 건이 유실될 수 있다.
-    runner = trader.run_live(kis.market_event_queue, dry_run=dry_run, on_quit=kis.stop, ws=kis.ws)
+    #
+    # build_trader/universe 를 넘기면 run_live() 가 그 안에서 최초 1회
+    # build_trader(trader, symbols) 를 불러 유니버스만큼 등록한다.
+    # universe_schedule 은 지금 안 준다 — 자동 재계산 없이, 콘솔 s/sc 로
+    # 필요할 때만 종목을 넣고 뺀다(SYMBOL이 아직 고정 리스트라 자동
+    # 재계산을 걸 이유가 없다). 나중에 실제 랭킹으로 바꾸면 universe=
+    # get_universe, universe_schedule=UniverseSchedule(interval=...) 로
+    # 바꿔 끼우면 된다.
+    runner = trader.run_live(kis.market_event_queue, dry_run=dry_run, on_quit=kis.stop, ws=kis.ws,
+                             build_trader=build_trader, universe=symbols)
 
     # trading/show 는 KiSEngine 자체 기능이라 여기선 안 쓴다 —
     # 주문 경로는 이미 AlphaTrader.run_live() 가 맡았다.
@@ -229,12 +247,16 @@ def run_live(dry_run: bool):
 def run_sim(simul):
     simul_mode = simul
     log.info("run_sim 시작")
-    kis = KiSEngine(price_codes=SYMBOL, orderbook_codes=SYMBOL, simul_mode=simul_mode)
+    symbols = list(SYMBOL)
+    kis = KiSEngine(price_codes=symbols, orderbook_codes=symbols, simul_mode=simul_mode)
     build_recording(kis, simul_mode=simul_mode)
-    trader = build_trader()
+
+    trader = AlphaTrader()
+    setup_core(trader)
 
     runner = trader.run_sim(kis.market_event_queue, on_quit=kis.stop, ws=kis.ws,
-                            simul_mode=simul_mode)
+                            simul_mode=simul_mode,
+                            build_trader=build_trader, universe=symbols)
     kis.run(recording=True, trading=False, show=False)   # 블로킹 — q → kis.stop() 이 풀어준다
 
     runner.stop()
@@ -270,7 +292,12 @@ def _load_dataframe(path: str | None):
 
 
 def run_backtest(path: str | None, plot: bool):
-    trader = build_trader()
+    # 백테스트는 실행 중 종목이 바뀔 일이 없다(한 번에 다 재생) — 유니버스
+    # 재계산기(UniverseManager) 없이 setup_core()/build_trader() 를
+    # 그냥 순서대로 직접 부른다.
+    trader = AlphaTrader()
+    setup_core(trader)
+    build_trader(trader, SYMBOL)
     df = _load_dataframe(path)
 
     result, eng = trader.run_backtest(df, symbol=SYMBOL, seconds=BAR_SECONDS, plot=plot)

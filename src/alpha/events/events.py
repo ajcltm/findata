@@ -497,6 +497,18 @@ class EventRouter:
             self._routes.setdefault((s.symbol, s.kind, s.variant), []) \
                 .append(subscriber)
 
+    def unregister(self, subscriber: Subscriber) -> None:
+        """구독자를 완전히 뗀다 — 동적 유니버스에서 종목/전략을 뺄 때 쓴다.
+
+        register() 가 채운 두 자리(_all, _routes) 를 그대로 되돌린다.
+        모르는 구독자를 줘도(이미 빠졌거나 애초에 없었거나) 조용히
+        아무 일도 안 한다 — 종료 경로에서 두 번 불러도 안전해야 한다."""
+        if subscriber in self._all:
+            self._all.remove(subscriber)
+        for subs in self._routes.values():
+            if subscriber in subs:
+                subs.remove(subscriber)
+
     def targets(self, ev: MarketEvent) -> list:
         """이 이벤트를 받을 구독자들. 정확 매치 + 와일드카드.
 

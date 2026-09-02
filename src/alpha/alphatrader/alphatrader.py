@@ -27,6 +27,7 @@ from kis import kis_config
 
 from alpha.engine.engine import Engine
 from alpha.engine.live_runner import LiveRunner
+from alpha.engine.universe import UniverseManager, UniverseSchedule, resolve_universe
 from alpha.broker.kis_broker import KISBroker
 from alpha.broker.sim_broker import SimBroker
 from alpha.events import events
@@ -90,6 +91,15 @@ class AlphaTrader:
         self._recorder = Recorder()
         self._defaults_built = False
 
+        # ★ 엔진/앱이 이미 살아있으면(run_live/run_sim 이 돈 뒤) ★
+        #   add_strategy()/add_view() 가 즉시 그 안에 반영된다 — 유니버스
+        #   재계산(alpha/engine/universe.py)이 build_trader(trader, 새_종목)
+        #   을 실행 중에 다시 부를 때 이 경로를 탄다. 초기 조립 단계
+        #   (run_live/run_sim 이 _build_engine() 을 부르기 전)에는 둘 다
+        #   None 이라 지금까지처럼 _specs/_view_specs 에 쌓이기만 한다.
+        self._engine: Optional[Engine] = None
+        self._app: Optional[Application] = None
+
     # ── 전략 등록 ────────────────────────────────────────────────
     def add_strategy(self, strategy_id: str, strategy: Strategy,
                       allocation: float,
@@ -97,15 +107,34 @@ class AlphaTrader:
                       bars: list[tuple[str, int]] = (),
                       warmup: int = 0, history: list = ()) -> "AlphaTrader":
         """Engine.add() 로 그대로 전달될 인자를 쌓아둔다.
-        실행은 run_live/run_sim/run_backtest 가 부를 때 비로소 일어난다."""
-        self._specs.append(dict(
+
+        엔진이 아직 없으면(초기 조립 중) 쌓아두기만 하고, run_live/run_sim
+        이 Engine 을 만들 때 한꺼번에 등록된다. 엔진이 이미 돌고 있으면
+        (유니버스 재계산 등) 여기서 바로 self._engine.add() 까지 해서
+        실행 중에도 즉시 반영한다."""
+        spec = dict(
             strategy_id=strategy_id, strategy=strategy, allocation=allocation,
             ticks=list(ticks), quotes=list(quotes), bars=list(bars),
             warmup=warmup, history=list(history),
-        ))
+        )
+        self._specs.append(spec)
         log.info("전략 등록: %s (%s) allocation=%s ticks=%s quotes=%s bars=%s",
                 strategy_id, type(strategy).__name__, allocation,
                 list(ticks), list(quotes), list(bars))
+
+        if self._engine is not None:
+            self._engine.add(strategy_id, strategy, allocation=allocation,
+                            ticks=spec["ticks"], quotes=spec["quotes"],
+                            bars=spec["bars"], warmup=warmup, history=spec["history"])
+            # 실행 중 등록도 초기 등록과 같은 자리에 기록을 남긴다 —
+            # _ensure_default_recording_and_views() 가 이미 돈 뒤이므로
+            # (엔진이 있다는 건 그 다음이라는 뜻) strategy 채널은 이미
+            # 구독돼 있다.
+            self._recorder.put(StrategySpec(
+                dt=datetime.now(), strategy_id=strategy_id,
+                strategy_class=type(strategy).__name__, allocation=allocation,
+                ticks=spec["ticks"], quotes=spec["quotes"], bars=spec["bars"],
+                warmup=warmup))
         return self
 
     def _ensure_manual_strategy(self) -> None:
@@ -247,6 +276,12 @@ class AlphaTrader:
         self._view_specs.append(dict(dtype=dtype, agg=agg, name=name, where=where,
                                      render_interval=render_interval))
         log.info("뷰 구독 등록: %s (%s)", name or dtype.__name__, type(agg).__name__)
+
+        if self._app is not None:
+            # 콘솔이 이미 떠 있다 — 지금 화면 목록 맨 뒤에 바로 추가한다
+            # (add_strategy() 가 엔진에 즉시 반영하는 것과 같은 이유).
+            self._app.subscribe(dtype, agg, name=name, where=where,
+                                render_interval=render_interval)
         return self
 
     def _add_default_view(self, dtype: type, agg: Aggregator, name: Optional[str] = None,
@@ -286,12 +321,49 @@ class AlphaTrader:
                      warmup=spec["warmup"], history=spec["history"])
         return eng
 
+    # ── 유니버스 배선 ────────────────────────────────────────────
+    def _initial_build(self, build_trader, universe) -> list[str]:
+        """build_trader 가 있으면 최초 유니버스로 한 번 부른다. 엔진이
+        아직 없는 시점(self._engine is None)에 부르므로 add_strategy() 는
+        지금까지처럼 _specs 에 쌓이기만 하고, 실제 Engine.add() 는 뒤이어
+        _build_engine() 이 한 번에 처리한다."""
+        if build_trader is None:
+            return []
+        symbols = resolve_universe(universe)
+        build_trader(self, symbols)
+        return symbols
+
+    def _wire_universe(self, eng: Engine, ws, build_trader, universe,
+                       universe_schedule, symbols: list[str]) -> None:
+        """universe_schedule 이 있으면 재계산기를 Engine 에 꽂는다 —
+        Engine.feed_timer() 가 매 주기 알아서 불러준다. build_trader 만
+        있고 schedule 이 없으면 최초 1회 등록으로 끝나지만, 콘솔 s/sc
+        (request_add/remove) 는 계속 쓸 수 있도록 스케줄을 아주 긴
+        간격(사실상 자동 재계산은 없음)으로 하나 만들어 둔다."""
+        if build_trader is None:
+            return
+        if universe_schedule is None:
+            # 자동 재계산 없이 콘솔 수동 추가/제거만 허용 — interval을
+            # 매우 크게 잡아 due() 가 자연 발생하지 않게 한다(첫 호출은
+            # UniverseSchedule 이 _last=None 이라 즉시 한 번 뜨지만, 이미
+            # known 에 최초 유니버스가 다 들어있어 재계산 결과가 no-op이다).
+            universe_schedule = UniverseSchedule(interval=10**9)
+        if ws is None:
+            log.warning("universe/build_trader 를 줬는데 ws 가 없습니다 — "
+                       "구독 추가/해지가 전부 실패합니다.")
+        eng.universe = UniverseManager(
+            trader=self, ws=ws, get_universe=(lambda: resolve_universe(universe)),
+            build_trader=build_trader, schedule=universe_schedule, known=symbols)
+
     # ── 실행 경로 ────────────────────────────────────────────────
     def run_live(self, market_event_queue, dry_run: bool = True,
                  business_date: Optional[date] = None,
                  kill_file: str = "./STOP_TRADING",
                  on_quit: Optional[Callable[[], None]] = None,
-                 ws=None) -> LiveRunner:
+                 ws=None,
+                 build_trader: Optional[Callable[["AlphaTrader", list[str]], None]] = None,
+                 universe=None,
+                 universe_schedule: Optional[UniverseSchedule] = None) -> LiveRunner:
         """실계좌. market_event_queue 는 KiSEngine.market_event_queue —
         웹소켓 수신·파싱·정규화가 이미 끝난 MarketEvent/Notice 스트림이다.
 
@@ -300,11 +372,29 @@ class AlphaTrader:
                   풀리고, 다운스트림 드레인·flush는 호출자(메인 파일)가
                   kis.run() 리턴 뒤에 이어서 한다.
         ws      : KiSEngine.ws(KisFeed). 콘솔의 수동 주문 화면이 '구독 중인
-                  종목' 번호 목록을 보여주는 데 쓴다 — 없어도 동작하지만
-                  그 화면에서 번호 목록이 비어 보인다."""
+                  종목' 번호 목록을 보여주는 데 쓴다. universe/universe_schedule
+                  를 쓸 거면 필수(재계산이 이걸로 구독을 추가/해지한다).
+
+        build_trader/universe/universe_schedule : 유니버스(대상 종목) 관리.
+            셋 다 선택 — 안 주면 지금까지처럼 add_strategy() 를 호출자가
+            직접 미리 해두는 방식 그대로 동작한다.
+
+            build_trader(trader, symbols)  종목 리스트를 받아 뭘 등록할지는
+                전부 자유(add_strategy/add_view 를 그 안에서 원하는 만큼
+                부르면 된다 — 종목당 인스턴스 하나든, 여러 종목을 전략
+                하나가 다 보든 상관없다). 최초 1회는 여기서 전체 유니버스로
+                부르고, universe_schedule 이 있으면 재계산 때마다 새로
+                들어온 종목만으로 다시 부른다(기존 종목은 다시 안 건드림).
+            universe        정적 리스트 또는 () -> list[str] 콜백(get_universe).
+            universe_schedule  UniverseSchedule(interval=... 또는 at=[...]).
+                안 주면 최초 1회만 등록하고 재계산은 안 한다(콘솔 s/sc 로
+                수동 추가/제거는 그래도 된다 — Engine.universe 가 그 통로다)."""
         log.info("AlphaTrader.run_live 시작 — 전략 %d개, dry_run=%s", len(self._specs), dry_run)
         broker = KISBroker()
         self._ensure_manual_strategy()
+
+        symbols = self._initial_build(build_trader, universe)
+
         # dry_run(--real 여부)과 무관하게 항상 alpha_data.db — 실계좌
         # 웹소켓으로 받은 데이터라는 사실은 주문을 실제로 냈는지와 별개다.
         self._ensure_default_recording_and_views(db_name="alpha_data.db")
@@ -313,11 +403,14 @@ class AlphaTrader:
         # 만드는 봉/외부이벤트를 view_q로 바로 흘리려면 Engine 생성 시점에
         # 그 큐가 이미 있어야 한다.
         app = self._apply_view(Application(on_quit=on_quit, ws=ws))
+        self._app = app                      # 이제부터 add_view() 가 즉시 반영된다
         eng = self._build_engine(broker, dry_run, view_q=app.view_q)
+        self._engine = eng                   # 이제부터 add_strategy() 가 즉시 반영된다
         # 콘솔 수동 주문 화면이 engine.slots[...] 로 StrategyBroker를 찾아야
         # 해서, Engine이 만들어진 뒤에 ctx에 심는다(Application보다 늦게
         # 생기므로 생성자에서 바로 못 준다).
         app.ctx.engine = eng
+        self._wire_universe(eng, ws, build_trader, universe, universe_schedule, symbols)
 
         runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=False, dry_run=dry_run,
@@ -333,6 +426,9 @@ class AlphaTrader:
                 on_quit: Optional[Callable[[], None]] = None,
                 ws=None,
                 simul_mode: bool = False,
+                build_trader: Optional[Callable[["AlphaTrader", list[str]], None]] = None,
+                universe=None,
+                universe_schedule: Optional[UniverseSchedule] = None,
                 **sim_broker_kwargs) -> LiveRunner:
         """모의투자. 실시간 market_event_queue 로 시세를 받되 주문은 가짜다.
 
@@ -347,15 +443,23 @@ class AlphaTrader:
                      가짜 주문) — 호출자가 KiSEngine(simul_mode=...)에 준
                      값과 같은 값을 그대로 줄 것(레코딩 파일이 갈린다).
                      live(alpha_data.db)와는 항상 별도 파일이라, 모의
-                     체결이 실전 기록에 섞이지 않는다."""
+                     체결이 실전 기록에 섞이지 않는다.
+        build_trader/universe/universe_schedule : run_live() 와 같다."""
         log.info("AlphaTrader.run_sim 시작 — 전략 %d개, cash=%s", len(self._specs), cash)
         broker = SimBroker(fill_q=market_event_queue, cash=cash, **sim_broker_kwargs)
         self._ensure_manual_strategy()
+
+        symbols = self._initial_build(build_trader, universe)
+
         db_name = "mock_simul.db" if simul_mode else "mock_data.db"
         self._ensure_default_recording_and_views(db_name=db_name)
         app = self._apply_view(Application(on_quit=on_quit, ws=ws))
+        self._app = app
         eng = self._build_engine(broker, dry_run=False, view_q=app.view_q)   # 모의는 항상 가짜주문을 낸다
+        self._engine = eng
         app.ctx.engine = eng
+        self._wire_universe(eng, ws, build_trader, universe, universe_schedule, symbols)
+
         runner = LiveRunner(engine=eng, trading_q=market_event_queue, view_q=app.view_q, broker=broker,
                             test_mode=True, dry_run=False,
                             business_date=business_date, kill_file=kill_file)
