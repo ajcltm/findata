@@ -17,7 +17,8 @@
     Tdata는 그 반복 작업을 클래스 뒤에 캡슐화한 것이다. "이름 하나 +
     DataFrame 하나"를 Leaf 라는 작은 단위로 감싸고, Tdata는 그런 Leaf를
     여러 장 겹쳐 들고 있으면서 시간축 맞추기(time_sync)/리샘플링
-    (set_time_frame)/그래프 그리기(plot) 같은 공통 동작을 대신해준다.
+    (resample_frame)/끊긴 구간 대응(split_by_gap, time_frame)/그래프
+    그리기(plot) 같은 공통 동작을 대신해준다.
 
 ■ "불변(immutable)"이라는 말의 뜻
     Leaf와 Tdata의 메서드들은 자기 자신을 바꾸지 않고, 대신 "바뀐 내용을
@@ -56,6 +57,19 @@ TIME = "t"  # 모든 Leaf가 공유하는 시간 인덱스 이름
 # ↑ 이렇게 "매직 넘버/매직 스트링"을 상수 하나로 빼두면, 나중에 인덱스
 #   이름을 바꾸고 싶을 때 이 한 줄만 고치면 된다(코드 여기저기 흩어진
 #   "t"라는 글자를 일일이 찾아 바꿀 필요가 없다).
+
+# Tdata.time_frame(mode=...) 에서 쓰는, 사람이 읽기 쉬운 단위 글자 ->
+# pandas가 pd.date_range(freq=...)에서 알아듣는 문자열 매핑.
+# "m"(월)/"y"(년)은 "MS"/"YS"(Month/Year Start)를 써서, 매달/매년의
+# 1일을 기준점으로 촘촘한 시간축을 만든다.
+_TIME_FRAME_FREQ: dict[str, str] = {
+    "s": "s",      # 초
+    "min": "min",  # 분
+    "h": "h",      # 시
+    "d": "D",      # 일
+    "m": "MS",     # 월(매월 1일)
+    "y": "YS",     # 년(매년 1월 1일)
+}
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +306,8 @@ class Tdata:
     time_sync() 같은 동작을 Tdata에 한 번만 걸면 안에 있는 모든 Leaf에
     일괄 적용되게 만든 것이다."""
 
-    def __init__(self, base: Leaf, others: Iterable[Leaf] = (), time_frame: str | None = None):
+    def __init__(self, base: Leaf, others: Iterable[Leaf] = (), resample_rule: str | None = None,
+                segments: "tuple[Tdata, ...] | None" = None):
         # _base : 이 Tdata의 "기준"이 되는 데이터 한 장(예: 가격 봉).
         #         tslice/where/query 같은 필터는 전부 이 _base에만 적용된다.
         # _others : _base 말고 곁들여 붙인 데이터들(예: 지표, 체결 등).
@@ -301,23 +316,46 @@ class Tdata:
         # 저장 형태는 항상 튜플로 통일한다 — Leaf처럼 "한 번 만든 뒤엔
         # 안 바뀐다"는 걸 보장하려는 것.
         self._others = tuple(others)
-        self.time_frame = time_frame   # set_time_frame()으로 리샘플했다면 그 규칙 문자열
+        # resample_frame()으로 리샘플했다면 그때 쓴 규칙 문자열(예: "1min").
+        # 이름을 "time_frame"이 아니라 "resample_rule"로 둔 이유: 아래
+        # time_frame()이라는 메서드가 따로 있는데, 인스턴스 속성과 메서드
+        # 이름이 겹치면 파이썬은 속성 쪽이 메서드를 완전히 가려버려서
+        # td.time_frame(...)이 "메서드 호출"이 아니라 "속성값을 호출하려는
+        # 시도"가 되어 버린다(그 속성이 문자열/None이면 "'str' object is
+        # not callable" 같은 에러가 난다) — 실제로 이 실수를 했다가 바로
+        # 잡았다.
+        self.resample_rule = resample_rule
         self._staged_cache: tuple[Leaf, ...] | None = None   # staged() 결과를 기억해두는 캐시
+        # split_by_gap()으로 시간 축이 끊긴 구간별로 쪼갠 적이 있으면, 그
+        # 전체 구간 목록(자기 자신 포함)이 여기 담긴다. 평범하게 만든
+        # Tdata는 None — "구간이라는 개념 자체가 없다"는 뜻이다.
+        # Tdata는(Leaf/Name과 달리) frozen dataclass가 아니라 그냥 클래스라서,
+        # split_by_gap()이 여러 개를 다 만든 "뒤에" 서로를 가리키게 이
+        # 속성을 나중에 대입해도 문제없다(아래 split_by_gap() 참고).
+        self._segments = segments
 
     # -- 생성 -------------------------------------------------------------
     @classmethod
-    def from_df(cls, name: str, df: pd.DataFrame, keys=(), agg=None, time_frame=None) -> "Tdata":
+    def from_df(cls, name: str, df: pd.DataFrame, keys=(), agg=None, resample_rule=None) -> "Tdata":
         """DataFrame 하나로부터 바로 Tdata를 만드는 지름길.
         Leaf를 직접 만들 필요 없이 Tdata.from_df("bar", df, keys=("symbol",))
         처럼 한 번에 쓸 수 있게 해준다(DataStore가 내부적으로 이 방식을 쓴다)."""
-        return cls(Leaf(name, df, tuple(keys), agg or {}), (), time_frame)
+        return cls(Leaf(name, df, tuple(keys), agg or {}), (), resample_rule)
 
-    def _spawn(self, base: Leaf, others: Iterable[Leaf], time_frame=None) -> "Tdata":
-        """"자기 자신과 같은 종류인데 base/others/time_frame만 바뀐"
+    def _spawn(self, base: Leaf, others: Iterable[Leaf], resample_rule=None) -> "Tdata":
+        """"자기 자신과 같은 종류인데 base/others/resample_rule만 바뀐"
         새 Tdata를 만드는 내부 공용 도우미. 아래 여러 메서드(tslice,
         where, time_sync 등)가 전부 "새 Tdata를 만들어 반환"할 때 이걸
-        거쳐가므로, 새로 만드는 방식을 한 곳에서만 관리할 수 있다."""
-        return Tdata(base, others, self.time_frame if time_frame is None else time_frame)
+        거쳐가므로, 새로 만드는 방식을 한 곳에서만 관리할 수 있다.
+
+        segments=self._segments 를 그대로 넘기는 게 핵심이다 — 이 덕분에
+        split_by_gap()으로 한 번 구간을 나눈 뒤에는, tslice()/where()/
+        time_sync() 등 뭘 체인으로 이어붙이든 "구간 목록을 기억하고 있다"
+        는 상태가 자동으로 계속 따라온다(이 메서드들을 한 줄도 안 고쳐도
+        된다 — 전부 결국 _spawn을 거쳐 가기 때문)."""
+        return Tdata(base, others,
+                    self.resample_rule if resample_rule is None else resample_rule,
+                    segments=self._segments)
 
     # -- 구조 -------------------------------------------------------------
     @property
@@ -432,14 +470,145 @@ class Tdata:
         # 문법)이 새 others가 된다.
         return self._spawn(synced[0], synced[1:])
 
-    def set_time_frame(self, rule: str) -> "Tdata":
+    def resample_frame(self, rule: str) -> "Tdata":
         """리샘플링. 컬럼별 규칙은 Leaf.agg, 미지정은 last.
 
         초보자 참고: "리샘플링(resample)"이란 예를 들어 1초마다 있던
         데이터를 1분 단위로 뭉쳐서 다시 만드는 것을 말한다. rule은
-        pandas가 이해하는 문자열이다(예: "1min", "5T", "1H")."""
+        pandas가 이해하는 문자열이다(예: "1min", "5T", "1H").
+
+        (예전 이름은 set_time_frame() 이었다 — "리샘플한다"는 동작이
+        바로 드러나도록 이름을 바꿨다. self.resample_rule 속성에는
+        여전히 이 rule 문자열이 남는다.)"""
         resampled = [_resample_leaf(lf, rule) for lf in self.leaves]
-        return self._spawn(resampled[0], resampled[1:], time_frame=rule)
+        return self._spawn(resampled[0], resampled[1:], resample_rule=rule)
+
+    def time_frame(self, mode: str, start, end) -> "Tdata":
+        """"정상적으로 끊김 없이 이어졌어야 할" 시간축을 사용자가 직접
+        정해서, 그 위에 데이터를 얹는다. 원래 데이터가 없는 자리는
+        ffill로 채우지 않고 그대로 비워(NaN) 둔다 — 그래야 나중에
+        plot()에서 그 구간이 "값이 있었는데 이어붙인 것"처럼 보이지
+        않고, 진짜로 빈 공간(끊긴 구간)으로 보인다.
+
+        mode  : "s"(초) / "min"(분) / "h"(시) / "d"(일) / "m"(월) / "y"(년)
+                중 하나 — 이 단위로 start부터 end까지 촘촘한 시간축을
+                만든다.
+        start, end : 그 시간축의 처음과 끝. 문자열("2026-09-03 09:00",
+                "2026-01-01")이든 date/datetime이든 pandas가 알아서
+                받는다.
+
+        ★ 이 메서드는 "정상"이 뭔지 스스로 판단하지 않는다 ★
+        공휴일을 뺄지, 장중 시간(09:00~15:30)만 볼지 같은 건 여기서
+        전혀 신경 쓰지 않는다 — mode="d"면 토요일/일요일/공휴일 가리지
+        않고 매일 하루씩, mode="h"면 새벽 시간대까지 매시간 다 채운
+        시간축을 그냥 만든다. 그런 "진짜 정상 거래 시간"이 필요하면,
+        사용자가 원하는 시각만 걸러낸 목록을 직접 계산해서 걸러 써야
+        한다(지금은 mode/start/end로 만드는 균일한 시간축만 지원).
+
+        예:
+            td.time_frame(mode="d", start="2026-01-01", end="2026-02-28").plot(dropna=False)
+            td.time_frame(mode="s", start="2026-09-03 09:00", end="2026-09-03 09:05").plot(dropna=False)
+
+        plot()에서 이 빈 구간을 실제로 "끊어서" 보려면 dropna=False를
+        같이 줘야 한다 — 기본값(dropna=True)은 NaN을 그리기 전에
+        지워버려서, 지금 일부러 넣어둔 빈 구간 표시가 사라진다."""
+        if mode not in _TIME_FRAME_FREQ:
+            raise ValueError(
+                f"모르는 mode: {mode!r} (알려진 것: {', '.join(_TIME_FRAME_FREQ)})"
+            )
+        # pd.date_range(start, end, freq=...) : start부터 end까지, freq
+        # 간격으로 촘촘한 시각 목록(DatetimeIndex)을 만드는 pandas 함수.
+        # 예: freq="D"면 하루 간격으로, freq="h"면 한 시간 간격으로.
+        idx = pd.date_range(start, end, freq=_TIME_FRAME_FREQ[mode])
+        framed = [_reindex_leaf(lf, idx, method=None) for lf in self.leaves]
+        return self._spawn(framed[0], framed[1:])
+
+    # -- 구간 분할(끊긴 녹화 대응) -------------------------------------------
+    @property
+    def segments(self) -> "tuple[Tdata, ...] | None":
+        """split_by_gap()으로 나눈 전체 구간 목록(자기 자신 포함).
+        한 번도 안 나눴으면 None이다. len(td.segments)로 몇 개로
+        쪼개졌는지, td.segments[i].base.times[[0,-1]]로 각 구간이
+        어느 시각부터 어느 시각까지인지 살펴볼 수 있다."""
+        return self._segments
+
+    def segment(self, i: int) -> "Tdata":
+        """i번째 구간을, 그 구간이 처음 나뉘었을 때의 "원본 상태"로
+        돌려준다 — 지금 self에 그동안 걸어둔 tslice()/where() 같은
+        필터는 여기서 리셋된다(구간을 넘어갈 때마다 그 필터가 계속
+        누적되면 예측하기 어려워지므로, 매번 그 구간의 순수한 데이터부터
+        다시 시작하게 만들었다). 그 구간에서부터 새로 체인을 이어가면
+        된다: td.segment(2).tslice(...).plot().
+
+        split_by_gap()을 부른 적이 없어 segments가 None이면, 아직
+        구간이라는 개념이 없다는 뜻이므로 에러를 낸다."""
+        if self._segments is None:
+            raise ValueError(
+                "이 Tdata는 split_by_gap()으로 나눈 적이 없어 구간이 없습니다."
+            )
+        return self._segments[i]
+
+    def split_by_gap(self, max_gap: "str | pd.Timedelta | None" = None,
+                     factor: float = 10, sample: int = 200) -> "Tdata":
+        """기준(base) 데이터의 시간축에서 "끊긴 지점"을 찾아 여러 구간으로
+        나눈다. 녹화(Recorder)가 중간에 멈췄다 다시 시작하면 그 시간
+        동안의 데이터가 통째로 비어서, 리샘플/이동평균/그래프 같은 걸
+        이어서 계산하면 그 빈 구간을 마치 아무 일도 없었던 것처럼 뭉개
+        버린다 — split_by_gap()은 그 끊긴 지점마다 데이터를 잘라서, 각
+        구간을 서로 별개인 Tdata로 다루게 해준다.
+
+        max_gap : 이 값보다 큰 시간 간격이 나오면 "끊겼다"고 본다.
+                  "5min"처럼 pandas가 이해하는 문자열이나 pd.Timedelta를
+                  준다. None(기본)이면 자동으로 판단한다 — 데이터 앞쪽
+                  sample개 구간의 간격을 보고 "이 데이터는 초 단위인지
+                  분 단위인지"부터 추정한 뒤(가장 자주 나온 간격 = 정상
+                  간격), 그 정상 간격의 factor배보다 크면 끊긴 것으로 본다.
+
+                  ★ 자동 판단의 한계(실측으로 확인한 것) ★
+                  봉(bar)처럼 간격이 거의 일정한 데이터에는 이 방식이 잘
+                  맞는다. 하지만 체결/호가처럼 원래도 간격이 들쭉날쭉한
+                  데이터는 "정상 간격"의 폭 자체가 넓어서(가끔 2~4초씩
+                  걸리는 것도 정상), factor를 너무 작게 잡으면 진짜
+                  끊김이 아닌 곳까지 무더기로 끊긴 걸로 오판한다 — 실제
+                  호가 9만여 행짜리 데이터로 재보니 factor=1.5에서는
+                  8,911개 구간(대부분 오탐)이 나왔고, factor=10에서는
+                  33개로 줄었다(수동으로 5분 임계값을 준 결과는 12개).
+                  그래서 기본값을 넉넉하게(factor=10) 잡아뒀지만, 이런
+                  불규칙한 데이터를 정밀하게 다뤄야 한다면 자동 판단에
+                  기대지 말고 max_gap을 직접 주는 걸 권장한다.
+        factor  : max_gap을 자동으로 잡을 때만 쓰는 배율(기본 10배).
+        sample  : 자동 판단 시 "정상 간격"을 추정하려고 앞에서부터 볼
+                  타임스탬프 간격 개수(기본 200개). 데이터 맨 앞부분이
+                  이미 끊겨 있는 극단적인 경우에도, 최빈값(mode)을 쓰므로
+                  대부분 정상 간격을 잘 잡아낸다.
+
+        반환값은 "0번 구간"의 Tdata다 — 그래서 이 메서드 뒤에 바로
+        .tslice()나 .plot() 같은 걸 체인으로 이어붙이면 자연스럽게 첫
+        구간을 기준으로 계속된다. 특정 구간부터 이어가고 싶으면
+        .segment(i)를 쓴다(예: td.split_by_gap("5min").segment(2)).
+
+        base 뿐 아니라 add()로 곁들여둔 다른 leaf(others)들도 전부 같은
+        구간 경계로 잘린다 — 그래야 한 구간 안에서는 봉/지표/체결 등이
+        전부 "그 구간의 시간대" 것들로만 맞춰진다."""
+        times = self._base.times
+        boundaries = _find_segment_bounds(times, max_gap, factor, sample)
+
+        segment_tdatas = []
+        for start, end in boundaries:
+            # 이 구간의 [start, end] 시간 범위로 base뿐 아니라 others까지
+            # 전부 잘라낸다(tslice()는 base만 자르지만, 여기서는 구간
+            # 안의 모든 데이터가 같은 시간대여야 하므로 leaves 전체를 돈다).
+            sliced = [_tslice_leaf(lf, start, end) for lf in self.leaves]
+            segment_tdatas.append(Tdata(sliced[0], sliced[1:], self.resample_rule))
+
+        segments = tuple(segment_tdatas)
+        # 다 만든 "뒤에" 서로를 가리키게 세팅한다 — 만드는 도중에는 아직
+        # segments 튜플 자체가 존재하지 않으므로, 전부 만들고 나서 한
+        # 바퀴 더 돌며 채워 넣는다. Tdata는 frozen이 아니라서 이렇게
+        # 생성 후에 속성을 채워 넣어도 문제없다.
+        for seg in segments:
+            seg._segments = segments
+        return segments[0]
 
     # -- 필터 (기준 데이터에만 적용, 계속 Tdata 반환) ------------------------
     def tslice(self, start=None, end=None) -> "Tdata":
@@ -489,17 +658,20 @@ class Tdata:
         # enumerate(seq) : 반복하면서 "몇 번째인지(0,1,2,...)"를 같이
         # 꺼내주는 파이썬 기본 함수. for i, lf in enumerate(leaves) 하면
         # i에 순번, lf에 그 leaf가 들어온다.
-        tf = f" time_frame={self.time_frame}" if self.time_frame else ""
+        tf = f" resample_rule={self.resample_rule}" if self.resample_rule else ""
         return f"<Tdata base={self._base.name} n={len(self)}{tf}>\n{body}"
 
     # -- 플롯 -------------------------------------------------------------
     def plot(self, layout=None, sync: str | None = None, by=None,
              figsize=None, height_ratios=None, palette="tab10", show: bool = True,
-             columns: Sequence[str] | None = None):
+             columns: Sequence[str] | None = None, dropna: bool = True):
         """seaborn 으로 그린다. 자세한 규칙은 plotter.plot_tdata 참고.
         show=True(기본)면 plt.show() 까지 불러 콘솔에서 바로 창이 뜬다.
         columns=["close"] 처럼 주면 그 컬럼(들)만 그린다(선택 사항 —
-        안 주면 지금까지처럼 모든 값 컬럼을 다 그린다)."""
+        안 주면 지금까지처럼 모든 값 컬럼을 다 그린다).
+        dropna=False로 주면 time_frame()으로 남겨둔 빈 구간(NaN)이
+        지워지지 않고 그대로 그려져서, 끊긴 자리가 실제로 끊겨 보인다
+        (기본 True는 예전처럼 NaN을 지우고 그린다)."""
         # 함수 맨 위가 아니라 여기, 메서드 "안"에서 import하는 걸 "지연
         # 임포트(lazy import)"라고 한다. plotter.py는 matplotlib/seaborn을
         # 불러오는데, 이건 그림을 그릴 때만 필요하지 데이터를 읽고 다룰
@@ -510,7 +682,7 @@ class Tdata:
 
         return plot_tdata(self, layout=layout, sync=sync, by=by, figsize=figsize,
                           height_ratios=height_ratios, palette=palette, show=show,
-                          columns=columns)
+                          columns=columns, dropna=dropna)
 
 
 # --------------------------------------------------------------------------
@@ -531,20 +703,85 @@ def _group_by_name(leaves: Sequence[Leaf]) -> dict[str, list[Leaf]]:
     return g
 
 
-def _sync_leaf(leaf: Leaf, t: pd.DatetimeIndex, how: str) -> Leaf:
-    """leaf 하나를 시간축 t에 맞춘다(time_sync()가 각 leaf에 대해 이 함수를
-    호출한다). how="inner"면 t에 있는 시각만 남기고, how="ffill"이면
-    t의 모든 시각에 대해 값을 만들되 없는 시각은 "직전 값"으로 채운다."""
-    if how == "inner":
-        # index.isin(t) : 인덱스의 각 시각이 t 안에 있는지 참/거짓으로
-        # 알려준다. 그걸로 df를 걸러서, t에도 있는 시각의 행만 남긴다.
-        return leaf.with_df(leaf.df[leaf.df.index.isin(t)])
+def _tslice_leaf(leaf: Leaf, start, end) -> Leaf:
+    """leaf 하나를 [start, end] 시간 범위로 자른다(split_by_gap()이 base뿐
+    아니라 others의 각 leaf에도 이 함수를 적용한다). Tdata.tslice()가
+    base 하나에 대해 하는 것과 똑같은 계산을 leaf 하나 단위로 뺀 것이다."""
+    return leaf.with_df(leaf.df.loc[start:end])
 
+
+def _infer_normal_step(times: pd.DatetimeIndex, sample: int) -> "pd.Timedelta | None":
+    """맨 앞 sample개 구간의 간격을 보고 "정상 간격"이 뭔지 추정한다.
+
+    초보자 참고: times가 [09:00:00, 09:00:01, 09:00:02, ...] 처럼 1초
+    간격이면, 연속한 값끼리의 차이(diff)도 거의 다 1초일 것이다. 그 중
+    가장 자주 나오는 값(최빈값, mode)을 "이 데이터의 정상 간격"으로
+    본다 — 맨 처음 한두 개 간격만 보면 그게 하필 진짜 끊긴 지점일 수도
+    있어서, 여러 개를 보고 그중 다수결로 정하는 것이다.
+
+    시각이 2개 미만이면(간격을 하나도 못 구하면) None을 돌려준다."""
+    if len(times) < 2:
+        return None
+    # times[1:] - times[:-1] : 인덱스를 하나씩 밀어서 서로 빼면, 바로
+    # 옆 시각끼리의 간격(Timedelta)들이 나온다. [:sample]로 앞에서부터
+    # 정해준 개수만큼만 본다(전체를 다 보지 않아도 충분하고, 이 편이
+    # 데이터가 아주 많을 때도 빠르다).
+    diffs = (times[1:] - times[:-1])[:sample]
+    if len(diffs) == 0:
+        return None
+    # pd.Series(...).mode() : 가장 자주 나오는 값(들)을 오름차순으로
+    # 돌려주는 pandas 함수. 여러 값이 동률(같은 빈도)일 수도 있어서
+    # 여러 개가 나올 수 있는데, 그중 제일 작은 것(iloc[0])을 쓴다.
+    return pd.Series(diffs).mode().iloc[0]
+
+
+def _find_segment_bounds(times: pd.DatetimeIndex, max_gap, factor: float,
+                         sample: int) -> list[tuple]:
+    """times(정렬된 시간축)를 끊긴 지점마다 잘라 (시작, 끝) 쌍의 목록으로
+    돌려준다. 끊긴 지점이 하나도 없으면 [(전체 시작, 전체 끝)] 하나짜리
+    목록이 된다(구간이 1개뿐인 것도 "나눴다"고 취급 — split_by_gap()의
+    반환값이 항상 똑같은 모양이 되게 하려는 것)."""
+    if len(times) == 0:
+        return [(None, None)]
+    if len(times) == 1:
+        return [(times[0], times[0])]
+
+    if max_gap is not None:
+        threshold = pd.Timedelta(max_gap)
+    else:
+        normal_step = _infer_normal_step(times, sample)
+        # 정상 간격을 아예 못 구했으면(극단적으로 데이터가 적으면) 끊긴
+        # 곳을 못 찾는다는 뜻이므로, 전체를 구간 하나로 본다.
+        if normal_step is None:
+            return [(times[0], times[-1])]
+        threshold = normal_step * factor
+
+    diffs = times[1:] - times[:-1]
+    # diffs[i] 는 times[i]와 times[i+1] 사이의 간격이다. 그게 threshold
+    # 보다 크면 "times[i]까지가 한 구간의 끝, times[i+1]부터가 다음
+    # 구간의 시작"이라는 뜻이다.
+    break_after = [i for i, d in enumerate(diffs) if d > threshold]
+
+    bounds = []
+    start_idx = 0
+    for i in break_after:
+        bounds.append((times[start_idx], times[i]))
+        start_idx = i + 1
+    bounds.append((times[start_idx], times[-1]))
+    return bounds
+
+
+def _reindex_leaf(leaf: Leaf, idx: pd.DatetimeIndex, method: "str | None") -> Leaf:
+    """leaf 하나를 새 시간축 idx로 재색인한다. method=None이면 원래
+    없던 시각은 NaN으로 비워두고, method="ffill"이면 직전 값으로
+    채운다. time_sync()의 ffill 모드와 time_frame() 이 공통으로 쓴다.
+
+    keys가 있으면(예: symbol별로 여러 종목이 섞여 있으면) 종목마다
+    따로따로 재색인해야 한다 — 안 그러면 ffill일 때 종목 A의 "직전 값"
+    이 종목 B로 새거나, method=None이어도 서로 다른 종목의 시간축이
+    한 표에 뒤섞여 버린다. 그래서 groupby로 종목별로 쪼갠 뒤 각각
+    reindex를 적용하고 다시 합친다."""
     if leaf.keys:
-        # keys가 있으면(예: symbol별로 여러 종목이 섞여 있으면), 종목마다
-        # 따로따로 시간축을 맞춰야 한다 — 종목 A의 "직전 값"이 종목 B로
-        # 새는 걸 막기 위해서다. 그래서 groupby로 종목별로 쪼갠 뒤 각각
-        # reindex(ffill)를 적용하고 다시 합친다.
         parts = []
         # observed=True : 카테고리 컬럼으로 groupby할 때, 실제 데이터에
         # 나타나지 않는 카테고리 값은 그룹으로 만들지 않는다(불필요한
@@ -554,28 +791,43 @@ def _sync_leaf(leaf: Leaf, t: pd.DatetimeIndex, how: str) -> Leaf:
             # kv가 그냥 값 하나("005930")로 오고, 여러 개면 튜플로 온다 —
             # 아래 zip(leaf.keys, kv) 에서 항상 튜플로 다루기 위해 통일한다.
             kv = kv if isinstance(kv, tuple) else (kv,)
-            # reindex(t, method="ffill") : 인덱스를 통째로 t로 바꾸면서,
-            # t에는 있지만 원래 없던 시각은 "바로 이전(ffill=forward fill)
-            # 값"으로 채운다.
-            g2 = g.drop(columns=list(leaf.keys)).reindex(t, method="ffill")
+            # reindex(idx, method=...) : 인덱스를 통째로 idx로 바꾼다.
+            # method="ffill"이면 idx에는 있지만 원래 없던 시각을 "바로
+            # 이전 값"으로 채우고, method=None이면 그 자리를 그냥 NaN으로
+            # 비워둔다(끊긴 구간을 진짜 빈 것처럼 보이게 하고 싶을 때).
+            g2 = g.drop(columns=list(leaf.keys)).reindex(idx, method=method)
             for col, val in zip(leaf.keys, kv):
                 # zip(a, b) : 두 시퀀스를 짝지어 (a[0],b[0]), (a[1],b[1])...
                 # 로 하나씩 묶어준다. 여기서는 "키 컬럼 이름"과 "그 그룹의
-                # 키 값"을 짝지어서, ffill로 없어진 키 컬럼을 다시 채운다.
+                # 키 값"을 짝지어서, reindex로 없어진 키 컬럼을 다시
+                # 채운다(값 컬럼과 달리 키 컬럼은 NaN으로 비우지 않고
+                # 그 그룹의 정체성을 그대로 유지시킨다).
                 g2[col] = val
             parts.append(g2)
         df = pd.concat(parts).sort_index()
         for k in leaf.keys:
             df[k] = df[k].astype("category")
     else:
-        df = leaf.df.reindex(t, method="ffill")
+        df = leaf.df.reindex(idx, method=method)
 
     df.index = df.index.rename(TIME)
     return leaf.with_df(df)
 
 
+def _sync_leaf(leaf: Leaf, t: pd.DatetimeIndex, how: str) -> Leaf:
+    """leaf 하나를 시간축 t에 맞춘다(time_sync()가 각 leaf에 대해 이 함수를
+    호출한다). how="inner"면 t에 있는 시각만 남기고, how="ffill"이면
+    t의 모든 시각에 대해 값을 만들되 없는 시각은 "직전 값"으로 채운다."""
+    if how == "inner":
+        # index.isin(t) : 인덱스의 각 시각이 t 안에 있는지 참/거짓으로
+        # 알려준다. 그걸로 df를 걸러서, t에도 있는 시각의 행만 남긴다.
+        return leaf.with_df(leaf.df[leaf.df.index.isin(t)])
+
+    return _reindex_leaf(leaf, t, method="ffill")
+
+
 def _resample_leaf(leaf: Leaf, rule: str) -> Leaf:
-    """leaf 하나를 rule 주기로 리샘플링한다(set_time_frame()이 각 leaf에
+    """leaf 하나를 rule 주기로 리샘플링한다(resample_frame()이 각 leaf에
     대해 이 함수를 호출한다)."""
     # {c: leaf.agg.get(c, "last") for c in leaf.value_cols} 은 "딕셔너리
     # 컴프리헨션"이다. value_cols에 있는 컬럼마다 "그 컬럼에 대해 agg에서
@@ -630,7 +882,8 @@ def _pivot_wide(leaf: Leaf) -> pd.DataFrame:
     return pd.concat(frames, axis=1)
 
 
-def to_long(leaf: Leaf, columns: Sequence[str] | None = None) -> pd.DataFrame:
+def to_long(leaf: Leaf, columns: Sequence[str] | None = None,
+           dropna: bool = True) -> pd.DataFrame:
     """seaborn 용 롱 포맷. series 컬럼이 hue 가 된다.
 
     초보자 참고 — "롱(long) 포맷"이 뭔가:
@@ -649,6 +902,14 @@ def to_long(leaf: Leaf, columns: Sequence[str] | None = None) -> pd.DataFrame:
               이 leaf에 없으면 그냥 조용히 무시된다(다른 leaf에는 있을 수
               있으므로 에러를 내지 않는다 — plot_tdata()가 leaf 여러
               개에 같은 columns 목록을 공통으로 적용하기 때문이다).
+
+    dropna : True(기본)면 value가 NaN인 행을 그리기 전에 지운다(지금까지
+              동작 그대로). Tdata.time_frame()으로 일부러 빈 구간을
+              NaN으로 남겨둔 경우에는 False를 줘야 한다 — 그래야 그
+              NaN 행이 그대로 남아서, matplotlib이 그 지점에서 선을
+              끊어 그린다(끊긴 구간이 진짜 빈 공간처럼 보인다). 지우면
+              양 옆의 점이 그냥 실선으로 이어져서 끊김이 감쪽같이
+              사라져 버린다.
 
     value_name을 바로 "value"로 주면, 원본에 마침 "value"라는 컬럼이
     있을 때(indicator 테이블처럼) pandas가 "value_name이 기존 컬럼과
@@ -695,6 +956,10 @@ def to_long(leaf: Leaf, columns: Sequence[str] | None = None) -> pd.DataFrame:
         tag = long[list(leaf.keys)].astype(str).agg("|".join, axis=1)
         series = series + "[" + tag + "]"
     long["series"] = series
+    if not dropna:
+        # 빈 구간을 일부러 보여주고 싶은 경우(time_frame() 이후) — NaN
+        # 행을 그대로 남겨서 matplotlib이 그 지점에서 선을 끊게 둔다.
+        return long
     # dropna(subset=["value"]) : value가 비어있는(NaN인) 행은 그래프에
     # 그릴 수 없으니 미리 빼둔다.
     return long.dropna(subset=["value"])

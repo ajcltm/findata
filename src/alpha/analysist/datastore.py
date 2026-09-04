@@ -18,8 +18,9 @@
     반면 ticks()/quotes()/bars()/fills()/notices()/indicators()/
     trades()/strategies() 는 "이 테이블은 무엇으로 식별되는가"를 이미
     아는 전용 메서드이므로, tdata.Tdata(analysist/tdata.py)로 감싸서
-    돌려준다 — plot()/time_sync()/set_time_frame() 등을 바로 쓸 수
-    있고, 여러 개를 Tdata.add()/`|`로 겹쳐 붙여 함께 그릴 수 있다.
+    돌려준다 — plot()/time_sync()/resample_frame()/time_frame()/
+    split_by_gap() 등을 바로 쓸 수 있고, 여러 개를 Tdata.add()/`|`로
+    겹쳐 붙여 함께 그릴 수 있다.
     원본 DataFrame이 필요하면 .df 로 꺼낸다(예: store.ticks("005930").df).
 
     label/seconds/strategy_id 처럼 "이 테이블 안의 하위 종류"를 고르는

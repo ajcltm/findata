@@ -175,7 +175,8 @@ def _merge_legend(ax_l, ax_r):
 
 def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                by=None, figsize=None, height_ratios=None, palette="tab10",
-               show: bool = True, columns: Sequence[str] | None = None):
+               show: bool = True, columns: Sequence[str] | None = None,
+               dropna: bool = True):
     """Tdata 를 그린다. (fig, axes) 반환.
 
     sync : None 이면 정렬하지 않는다(sharex 로 시각적 정렬은 이미 됨).
@@ -196,6 +197,10 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
            특정 leaf에서만 특정 컬럼만 고르고 싶다면(leaf마다 다른 컬럼),
            이 옵션 대신 layout=[(["이름.컬럼"], [...]), ...] 형태로
            "leaf이름.컬럼이름" 선택자를 직접 쓰면 된다(resolve() 참고).
+    dropna : True(기본)면 값이 없는(NaN) 지점을 그리기 전에 지운다.
+           Tdata.time_frame()으로 일부러 빈 구간을 NaN으로 남겨서 그
+           구간을 시각적으로 끊어 보여주고 싶다면 False로 준다 — 지우지
+           않고 그대로 두면 matplotlib이 NaN 지점에서 선을 끊어 그린다.
     """
     if sync is not None:
         td = td.time_sync(how=sync)
@@ -205,7 +210,7 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
     # 딕셔너리 컴프리헨션: {leaf 이름: 그 leaf를 롱 포맷으로 바꾼 것, ...}
     # 나중에 resolve()가 이름으로 바로 찾아 쓸 수 있도록 미리 다 바꿔둔다.
     # columns를 그대로 넘기면 to_long()이 그 이름들만 남기고 melt한다.
-    longs = {lf.name: to_long(lf, columns=columns) for lf in leaves}
+    longs = {lf.name: to_long(lf, columns=columns, dropna=dropna) for lf in leaves}
     if layout is not None:
         rows = list(layout)
     else:
