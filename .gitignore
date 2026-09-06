@@ -5,6 +5,8 @@
 !.gitignore
 !/src/
 !/src/**
+!/notebook/
+!/notebook/**
 
 # --------------------------------------------------
 # 아래에 적어두신 Python 규칙들(__pycache__, .egg-info, *config*.py 등)에
