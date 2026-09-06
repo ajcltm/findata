@@ -294,11 +294,64 @@ def _dedup_exact(df: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
     return flat.set_index(TIME).sort_index()
 
 
+# staged(dedup=...)/plot(dedup=...)가 받는 값. "이미 있는 여러 행 중
+# 대표값 하나를 어떻게 고를지"를 정한다(time_sync의 how="inner"/"ffill"과는
+# 정반대 문제 — 그쪽은 "값이 아예 없는 자리를 어떻게 채울지"다. 그래서
+# 어휘를 안 섞고 따로 둔다).
+_DEDUP_MODES = ("last", "first", "max", "min")
+
+
+def _apply_dedup(leaf: Leaf, dedup: str) -> Leaf:
+    """같은 (t, *keys)에 행이 여러 개 있으면(tick/quote처럼 한 시간
+    안에 실제로 여러 사건이 있을 수 있는 데이터) dedup 방식으로 하나씩
+    으로 줄인다.
+
+    키가 아니면서 숫자인 값 컬럼(leaf.value_cols)은 dedup(last/first/
+    max/min) 그대로 집계하고, 나머지(문자열 등) 컬럼은 그냥 "last"로
+    고정한다 — 문자열에 "최댓값"은 뜻이 애매해서다.
+
+    max/min을 쓰면 서로 다른 원본 행에서 나온 값들이 한 행으로 섞일 수
+    있다(예: 어떤 행의 price 최댓값 + 다른 행의 volume 최댓값) — 이건
+    봉(OHLC: open=first, high=max, low=min, close=last)을 만들 때도
+    이미 쓰는 익숙한 관례라 새로운 문제는 아니다."""
+    df = leaf.df
+    if not leaf.keys and df.index.is_unique:
+        return leaf   # 이미 유일하면 손댈 게 없다(가장 흔한 경우 — 빠른 경로)
+
+    spec = {}
+    for col in df.columns:
+        if col in leaf.keys:
+            continue   # 키 컬럼은 그룹 안에서 이미 똑같은 값이라 집계할 필요가 없다
+        spec[col] = dedup if col in leaf.value_cols else "last"
+    if not spec:
+        return leaf
+
+    flat = df.reset_index()
+    group_cols = [TIME, *leaf.keys]
+    merged = flat.groupby(group_cols, observed=True, sort=True, as_index=False).agg(spec)
+    merged = merged.set_index(TIME)
+    return leaf.with_df(merged)
+
+
 # --------------------------------------------------------------------------
 # Tdata
 # --------------------------------------------------------------------------
-class Tdata:
+# 여기서(파일 맨 위가 아니라) import하는 이유: finance.py가 "from .tdata
+# import Leaf"를 하는데, 그 시점에 이 tdata 모듈이 이미 Leaf/TIME까지는
+# 다 정의해 둔 상태여야 한다(순환 import). 파일 맨 위에서 finance를
+# 당겨오면 아직 Leaf가 정의되기 전이라 실패한다 — Tdata 클래스 선언
+# "바로 위"에서 당겨오면 Leaf/Name/TIME이 이미 다 있는 상태라 안전하다.
+from .finance import FinanceMixin
+
+
+class Tdata(FinanceMixin):
     """기준 Leaf + 주입된 Leaf들의 컴포짓. 모든 연산은 새 인스턴스를 낳는다.
+
+    FinanceMixin(analysist/finance.py)을 상속해서 relative()/pct_change()/
+    sma()/drawdown()/benchmark()/agg()/summary() 같은 주식 금융 지표
+    계산도 바로 메서드로 쓸 수 있다 — 그 구현은 이 클래스가 몰라도
+    되는 별개 관심사라 파일을 나눠뒀다(자세한 분류 기준은 finance.py
+    모듈 docstring 참고).
 
     초보자 참고: "컴포짓(composite)"이란 "여러 개의 작은 것들을 하나로
     묶어서, 마치 하나인 것처럼 다루는" 디자인 패턴을 말한다. 여기서는
@@ -333,6 +386,14 @@ class Tdata:
         # split_by_gap()이 여러 개를 다 만든 "뒤에" 서로를 가리키게 이
         # 속성을 나중에 대입해도 문제없다(아래 split_by_gap() 참고).
         self._segments = segments
+        # time_frame()을 거친 적이 있으면 True — 끊긴 구간을 일부러 NaN
+        # 으로 남겨뒀다는 뜻이다(plot()이 이 값을 보고 dropna 기본값을
+        # 정한다 — 아래 plot() 참고). 생성자 인자로는 안 받는다 — 사용자가
+        # Tdata(...)를 직접 만들 때 신경 쓸 값이 아니라, time_frame()과
+        # _spawn() 사이에서만 오가는 순전히 내부용 값이라서다(segments도
+        # 같은 이유로 나중에 속성으로 채워 넣는 방식을 쓴 적이 있다 —
+        # 다만 그건 이미 생성자 인자로 나가 있어 그대로 둔다).
+        self._framed = False
 
     # -- 생성 -------------------------------------------------------------
     @classmethod
@@ -342,7 +403,8 @@ class Tdata:
         처럼 한 번에 쓸 수 있게 해준다(DataStore가 내부적으로 이 방식을 쓴다)."""
         return cls(Leaf(name, df, tuple(keys), agg or {}), (), resample_rule)
 
-    def _spawn(self, base: Leaf, others: Iterable[Leaf], resample_rule=None) -> "Tdata":
+    def _spawn(self, base: Leaf, others: Iterable[Leaf], resample_rule=None,
+              framed: "bool | None" = None) -> "Tdata":
         """"자기 자신과 같은 종류인데 base/others/resample_rule만 바뀐"
         새 Tdata를 만드는 내부 공용 도우미. 아래 여러 메서드(tslice,
         where, time_sync 등)가 전부 "새 Tdata를 만들어 반환"할 때 이걸
@@ -352,10 +414,16 @@ class Tdata:
         split_by_gap()으로 한 번 구간을 나눈 뒤에는, tslice()/where()/
         time_sync() 등 뭘 체인으로 이어붙이든 "구간 목록을 기억하고 있다"
         는 상태가 자동으로 계속 따라온다(이 메서드들을 한 줄도 안 고쳐도
-        된다 — 전부 결국 _spawn을 거쳐 가기 때문)."""
-        return Tdata(base, others,
+        된다 — 전부 결국 _spawn을 거쳐 가기 때문). framed=self._framed도
+        기본으로 그대로 물려주고, time_frame()만 명시적으로 True를 넘겨
+        새로 세팅한다. framed는 생성자 인자가 아니라서, 여기서는 일단
+        평범하게 만든 뒤 속성으로 덮어쓴다(Tdata는 frozen이 아니라 이렇게
+        생성 후에 속성을 채워도 안전하다)."""
+        new = Tdata(base, others,
                     self.resample_rule if resample_rule is None else resample_rule,
                     segments=self._segments)
+        new._framed = self._framed if framed is None else framed
+        return new
 
     # -- 구조 -------------------------------------------------------------
     @property
@@ -397,16 +465,31 @@ class Tdata:
 
     # -- 주입 -------------------------------------------------------------
     def add(self, other: "Leaf | Tdata", by: Sequence[str] | None = None) -> "Tdata":
-        """others 에 추가. 충돌 데이터면 여기서 즉시 예외."""
-        # 넘어온 게 Tdata 통째로면 그 안의 leaves를 전부 풀어서 추가하고,
-        # Leaf 하나만 왔으면 리스트 하나짜리로 감싼다 — 어느 쪽이든 아래
-        # for 문은 "Leaf들의 리스트"만 상대하면 되게 통일하는 것이다.
+        """others 에 추가. 충돌 데이터면 여기서 즉시 예외.
+
+        ★ "충돌"은 항상 기존 leaf와 비교했을 때만 의미가 있다 ★
+        이 Tdata에 아직 같은 이름의 leaf가 없으면, 새로 들어오는 leaf는
+        비교할 대상이 없으므로 그냥 붙인다 — 그 leaf 혼자 (t,*keys)가
+        유일하지 않다고 해서 그게 "충돌"은 아니다. 체결(tick)처럼 같은
+        1초 안에 서로 다른 가격으로 여러 번 체결되는 게 지극히 정상인
+        데이터는, symbol 하나만 키로 두면 항상 (t,symbol) 중복이 생기지만
+        —그 중복 행들은 값이 다른 게 아니라 그 시간 해상도로는 서로
+        구분 못 할 뿐인 "서로 다른 진짜 사건들"이다. 이미 있는 같은
+        이름의 leaf와 합칠 때(staged()가 하는 일과 같은 상황)만 "두
+        데이터가 같은 사실을 서로 다르게 말하고 있다"는 진짜 충돌을
+        검사한다."""
         incoming = list(other.leaves) if isinstance(other, Tdata) else [other]
+        existing_by_name = {lf.name: lf for lf in self.leaves}
         for lf in incoming:
-            bad = find_conflicts(lf.df, _resolve_keys(lf, by))
+            existing = existing_by_name.get(lf.name)
+            if existing is None:
+                continue
+            keys = _resolve_keys(lf, by)
+            merged = pd.concat([existing.df, lf.df])
+            bad = find_conflicts(merged, keys)
             if len(bad):
                 raise ValueError(
-                    f"[{lf.name}] {len(bad)}행 충돌. 정제 후 넣으세요. "
+                    f"[{lf.name}] 기존 데이터와 {len(bad)}행 충돌. 정제 후 넣으세요. "
                     f"첫 충돌 시각: {bad.index[0]}"
                 )
         return self._spawn(self._base, self._others + tuple(incoming))
@@ -417,23 +500,47 @@ class Tdata:
         return self.add(other)
 
     def conflicts(self, by: Sequence[str] | None = None) -> dict[str, pd.DataFrame]:
-        """진단 전용. name -> 충돌 행. 비어 있으면 정상."""
+        """진단 전용. name -> 충돌 행. 비어 있으면 정상.
+
+        같은 이름의 leaf가 2장 이상 있어서 실제로 합쳐야 할 때만 본다
+        (add()와 같은 정의) — leaf가 1장뿐이면 비교할 대상이 없으니
+        건너뛴다. tick처럼 leaf 혼자서도 (t,*keys)가 원래 유일하지 않은
+        데이터를 "충돌"로 잘못 보고하지 않기 위해서다."""
         out = {}
         for name, group in _group_by_name(self.leaves).items():
+            if len(group) < 2:
+                continue
             keys = _resolve_keys(group[0], by)
-            merged = pd.concat([lf.df for lf in group]) if len(group) > 1 else group[0].df
+            merged = pd.concat([lf.df for lf in group])
             bad = find_conflicts(merged, keys)
             if len(bad):
                 out[name] = bad
         return out
 
     # -- 병합(스테이징) ----------------------------------------------------
-    def staged(self, by: Sequence[str] | None = None) -> tuple[Leaf, ...]:
-        """동일 name Leaf들을 아래로 병합한 결과. 기본 경로만 캐시."""
-        # 같은 이름으로 여러 번 add()된 적이 없다면 캐시를 그대로 재사용해서
-        # 매번 다시 계산하지 않는다(속도 최적화). by를 직접 지정한 특수한
-        # 호출은 캐시하지 않는다 — 매번 다른 결과가 나올 수 있어서다.
-        if by is None and self._staged_cache is not None:
+    def staged(self, by: Sequence[str] | None = None,
+              dedup: "str | None" = None) -> tuple[Leaf, ...]:
+        """동일 name Leaf들을 아래로 병합한 결과. 기본 경로만 캐시.
+
+        dedup : None(기본)이면 손대지 않는다. "last"/"first"/"max"/
+               "min"을 주면, 같은 (t,*keys)에 행이 여러 개 있는 leaf
+               (tick/quote처럼 한 시간 안에 실제로 여러 사건이 있을 수
+               있는 데이터)를 그 방식으로 하나씩으로 줄인다(_apply_dedup
+               참고).
+
+               기본값을 일부러 None(끄기)으로 둔 이유: 이 프레임워크는
+               "정상"이 뭔지 스스로 판단하지 않는다는 원칙을 지금까지
+               지켜왔다(time_frame()이 거래시간을 안 판단하는 것과 같은
+               이유) — tick 데이터를 정밀하게 보고 싶은 사용자의 행이
+               plot()/staged() 어디서든 조용히 줄어드는 일이 없도록,
+               필요할 때만 명시적으로 켠다."""
+        if dedup is not None and dedup not in _DEDUP_MODES:
+            raise ValueError(f"모르는 dedup: {dedup!r} (알려진 것: {', '.join(_DEDUP_MODES)})")
+        # 같은 이름으로 여러 번 add()된 적이 없고 dedup도 안 켰다면 캐시를
+        # 그대로 재사용해서 매번 다시 계산하지 않는다(속도 최적화). by나
+        # dedup을 직접 지정한 특수한 호출은 캐시하지 않는다 — 매번 다른
+        # 결과가 나올 수 있어서다.
+        if by is None and dedup is None and self._staged_cache is not None:
             return self._staged_cache
 
         out: list[Leaf] = []
@@ -441,14 +548,17 @@ class Tdata:
             head = group[0]
             if len(group) == 1:
                 # 같은 이름의 Leaf가 하나뿐이면 합칠 것도 없으니 그대로 쓴다.
-                out.append(head)
-                continue
-            keys = _resolve_keys(head, by)
-            merged = _dedup_exact(pd.concat([lf.df for lf in group]), keys)
-            out.append(head.with_df(merged))
+                merged_leaf = head
+            else:
+                keys = _resolve_keys(head, by)
+                merged = _dedup_exact(pd.concat([lf.df for lf in group]), keys)
+                merged_leaf = head.with_df(merged)
+            if dedup is not None:
+                merged_leaf = _apply_dedup(merged_leaf, dedup)
+            out.append(merged_leaf)
 
         result = tuple(out)
-        if by is None:
+        if by is None and dedup is None:
             self._staged_cache = result
         return result
 
@@ -506,12 +616,14 @@ class Tdata:
         한다(지금은 mode/start/end로 만드는 균일한 시간축만 지원).
 
         예:
-            td.time_frame(mode="d", start="2026-01-01", end="2026-02-28").plot(dropna=False)
-            td.time_frame(mode="s", start="2026-09-03 09:00", end="2026-09-03 09:05").plot(dropna=False)
+            td.time_frame(mode="d", start="2026-01-01", end="2026-02-28").plot()
+            td.time_frame(mode="s", start="2026-09-03 09:00", end="2026-09-03 09:05").plot()
 
-        plot()에서 이 빈 구간을 실제로 "끊어서" 보려면 dropna=False를
-        같이 줘야 한다 — 기본값(dropna=True)은 NaN을 그리기 전에
-        지워버려서, 지금 일부러 넣어둔 빈 구간 표시가 사라진다."""
+        plot()은 이 Tdata가 time_frame()을 거쳤다는 걸 스스로 기억해두고
+        dropna 기본값을 자동으로 False로 바꾼다 — 그래서 위처럼 plot()을
+        그냥 불러도 빈 구간이 실제로 끊겨 보인다(따로 dropna=False를
+        안 챙겨도 된다). 그래도 굳이 이어 그리고 싶으면 plot(dropna=True)
+        로 다시 덮어쓸 수 있다."""
         if mode not in _TIME_FRAME_FREQ:
             raise ValueError(
                 f"모르는 mode: {mode!r} (알려진 것: {', '.join(_TIME_FRAME_FREQ)})"
@@ -520,8 +632,8 @@ class Tdata:
         # 간격으로 촘촘한 시각 목록(DatetimeIndex)을 만드는 pandas 함수.
         # 예: freq="D"면 하루 간격으로, freq="h"면 한 시간 간격으로.
         idx = pd.date_range(start, end, freq=_TIME_FRAME_FREQ[mode])
-        framed = [_reindex_leaf(lf, idx, method=None) for lf in self.leaves]
-        return self._spawn(framed[0], framed[1:])
+        reindexed = [_reindex_leaf(lf, idx, method=None) for lf in self.leaves]
+        return self._spawn(reindexed[0], reindexed[1:], framed=True)
 
     # -- 구간 분할(끊긴 녹화 대응) -------------------------------------------
     @property
@@ -531,6 +643,10 @@ class Tdata:
         쪼개졌는지, td.segments[i].base.times[[0,-1]]로 각 구간이
         어느 시각부터 어느 시각까지인지 살펴볼 수 있다."""
         return self._segments
+
+    @property
+    def segments_len(self) :
+        return len(self._segments) if self._segments is not None else 0
 
     def segment(self, i: int) -> "Tdata":
         """i번째 구간을, 그 구간이 처음 나뉘었을 때의 "원본 상태"로
@@ -619,13 +735,28 @@ class Tdata:
         return self._spawn(self._base.with_df(self._base.df.loc[start:end]), self._others)
 
     def where(self, cond: Callable[[pd.DataFrame], pd.Series]) -> "Tdata":
-        """cond(df) -> bool Series 로 기준 데이터를 거른다.
+        """cond(df) -> bool Series 로 기준 데이터를 거른다(행 필터 전용 —
+        컬럼을 고르고 싶으면 이 메서드가 아니라 plot(columns=...)를 쓴다).
 
         예: td.where(lambda df: df["close"] > 70000)
         cond는 "DataFrame을 받아서, 각 행이 참/거짓인 Series를 돌려주는
-        함수"다. df[bool_series] 형태로 조건에 맞는 행만 남긴다."""
+        함수"다. df[bool_series] 형태로 조건에 맞는 행만 남긴다.
+
+        cond(df)가 bool이 아닌 걸 돌려주면(예: 컬럼 이름 리스트) 여기서
+        바로 에러를 낸다 — 안 그러면 df[["price"]] 처럼 "행 거르기"가
+        아니라 "컬럼만 남기기"로 해석돼서, keys 컬럼(symbol 등)까지
+        같이 날아가 버리고 한참 뒤 with_df()에서야 알아보기 힘든 에러가
+        난다(실제로 이 문제가 있었다)."""
         df = self._base.df
-        return self._spawn(self._base.with_df(df[cond(df)]), self._others)
+        mask = cond(df)
+        if not pd.api.types.is_bool_dtype(pd.array(mask)):
+            raise TypeError(
+                f"where()의 cond(df)는 각 행이 참/거짓인 bool Series/배열을 "
+                f"돌려줘야 합니다(받은 값 타입: {type(mask).__name__}). "
+                "특정 컬럼만 고르고 싶다면 where()가 아니라 "
+                "td.plot(columns=[\"leaf이름.컬럼이름\"])을 쓰세요."
+            )
+        return self._spawn(self._base.with_df(df[mask]), self._others)
 
     def query(self, expr: str, **kw) -> "Tdata":
         """문자 비교 등 pandas query 표현식.
@@ -640,6 +771,28 @@ class Tdata:
     def head(self, n: int = 5) -> "Tdata":
         """기준 데이터의 앞에서 n개 행만 남긴 새 Tdata (내용을 훑어볼 때)."""
         return self._spawn(self._base.with_df(self._base.df.head(n)), self._others)
+
+    def columns(self, cols: "str | Sequence[str]") -> "Tdata":
+        """기준(base) 데이터를 주어진 컬럼(들)만 남기고 나머지는 버린다.
+        Tdata를 반환하니 그대로 체인을 이어갈 수 있다(예: 특정 컬럼만
+        남긴 뒤 sma()/pct_change() 등을 계속 건다).
+
+            td.columns("close")                # 문자열 하나만 줘도 되고
+            td.columns(["close", "volume"])    # 리스트로 여러 개도 된다
+
+        키 컬럼(symbol 등)은 적지 않아도 자동으로 같이 남는다 — 직접
+        df[["close"]]처럼 골라내면 keys 컬럼까지 같이 날아가서, 나중에
+        Leaf가 "keys 컬럼 없음"으로 에러를 내는 사고가 난다(where()에
+        컬럼 이름 리스트를 잘못 넣었을 때 실제로 겪었던 문제와 같은
+        종류라, 여기서는 애초에 그 실수가 안 나게 만들었다)."""
+        # 문자열 하나만 왔으면(symbol="005930" 같은 다른 곳의 관례처럼)
+        # 리스트 하나짜리로 감싼다 — 아래 로직은 항상 리스트를 가정한다.
+        names = [cols] if isinstance(cols, str) else list(cols)
+        # dict.fromkeys(...) : 리스트에서 중복을 없애면서 순서는 그대로
+        # 유지하는 흔한 트릭이다 — 키 컬럼을 먼저 두고 요청한 컬럼들을
+        # 이어 붙이되, 혹시 겹치는 이름이 있어도 한 번만 남는다.
+        keep = list(dict.fromkeys([*self._base.keys, *names]))
+        return self._spawn(self._base.with_df(self._base.df[keep]), self._others)
 
     # -- 표현 -------------------------------------------------------------
     def to_frame(self, by: Sequence[str] | None = None) -> pd.DataFrame:
@@ -662,16 +815,54 @@ class Tdata:
         return f"<Tdata base={self._base.name} n={len(self)}{tf}>\n{body}"
 
     # -- 플롯 -------------------------------------------------------------
-    def plot(self, layout=None, sync: str | None = None, by=None,
-             figsize=None, height_ratios=None, palette="tab10", show: bool = True,
-             columns: Sequence[str] | None = None, dropna: bool = True):
+    def series(self, by: Sequence[str] | None = None) -> list[str]:
+        """plot()을 부르면 실제로 그려질 시리즈 이름들을 미리 훑어본다.
+        plot()에 뭘 넘겨야 할지 감이 안 잡힐 때 먼저 이걸 찍어보고,
+        나온 문자열을 그대로 복사해서 columns=/layout=에 쓰면 된다.
+
+            for s in td.series():
+                print(s)
+            td.plot(columns=[td.series()[0]])   # 방금 본 것 중 하나만
+
+        "leaf이름.컬럼이름" 또는(키가 있으면) "leaf이름.컬럼이름[키값]"
+        형태다(키값은 여러 개면 "|"로 이어 붙는다, 예: "[005930|macd]")."""
+        from .plotter import list_series
+
+        return list_series(self, by=by)
+
+    def plot(self, layout=None, sync: str | None = "inner", sync_num: "int | None" = None,
+             by=None, figsize=None, height_ratios=None, palette="husl", show: bool = True,
+             columns: Sequence[str] | None = None, dropna: "bool | None" = None,
+             kind="line", theme: "str | None" = "darkgrid", dedup: "str | None" = "last"):
         """seaborn 으로 그린다. 자세한 규칙은 plotter.plot_tdata 참고.
         show=True(기본)면 plt.show() 까지 불러 콘솔에서 바로 창이 뜬다.
-        columns=["close"] 처럼 주면 그 컬럼(들)만 그린다(선택 사항 —
-        안 주면 지금까지처럼 모든 값 컬럼을 다 그린다).
-        dropna=False로 주면 time_frame()으로 남겨둔 빈 구간(NaN)이
-        지워지지 않고 그대로 그려져서, 끊긴 자리가 실제로 끊겨 보인다
-        (기본 True는 예전처럼 NaN을 지우고 그린다)."""
+        columns=["sma20@close.sma"] 처럼 "leaf이름.컬럼이름"을 주면 그
+        leaf 하나만 그 컬럼으로 좁히고 나머지 leaf는 그대로 다 그린다
+        (columns=["close"]처럼 컬럼 이름만 주면 그 컬럼을 가진 leaf에만
+        적용되고, 없는 leaf는 안 건드린다). 안 주면 지금까지처럼 모든
+        leaf의 모든 값 컬럼을 다 그린다.
+        sync/sync_num : 그리기 전에 time_sync(num=sync_num, how=sync)를
+        불러 시간축을 맞춘다. sync는 "어떻게"(inner/ffill, 값이 아예
+        없는 자리를 어떻게 할지), sync_num은 "누구를 기준으로"(None=
+        기준 데이터, 정수면 그 번째 others)다. 둘 다 안 주면 정렬하지
+        않는다(sharex로 시각적 정렬은 이미 됨).
+        dedup : None(기본)이면 손대지 않는다. "last"/"first"/"max"/
+        "min"을 주면 그리기 전에 staged(dedup=...)를 거쳐서, 같은
+        (t,*키)에 행이 여러 개 있는 leaf(tick/quote처럼 한 시간에 여러
+        사건이 있을 수 있는 데이터)를 그 방식으로 하나씩 줄인다.
+        sync/sync_num(빈 자리를 채우는 문제)과는 다른 문제라는 점에
+        주의 — dedup은 "이미 여러 개 있는 값" 중 대표값을 고르는 것이다.
+        dropna : None(기본)이면 이 Tdata가 time_frame()을 거쳤는지 보고
+        알아서 정한다 — 거쳤으면 False(빈 구간을 실제로 끊어서 보여줌),
+        안 거쳤으면 True(예전처럼 NaN을 지우고 그림). 명시적으로 True/
+        False를 주면 그게 항상 우선한다(예: time_frame() 이후에도 굳이
+        이어서 그리고 싶으면 dropna=True로 덮어쓴다).
+        kind="line"(기본)/"mark"/"bar" 또는 {"이름": "형태", ...}로
+        무엇을 어떻게 그릴지 고른다 — 자세한 규칙은 plotter.plot_tdata
+        참고.
+        theme="darkgrid"(기본, seaborn 특유의 회색 격자 배경)/"whitegrid"/
+        "dark"/"white"/"ticks" 중 하나, 또는 None(스타일 안 건드림). 이
+        호출 한 번에만 적용되고 끝나면 원래 matplotlib 설정으로 돌아간다."""
         # 함수 맨 위가 아니라 여기, 메서드 "안"에서 import하는 걸 "지연
         # 임포트(lazy import)"라고 한다. plotter.py는 matplotlib/seaborn을
         # 불러오는데, 이건 그림을 그릴 때만 필요하지 데이터를 읽고 다룰
@@ -680,9 +871,12 @@ class Tdata:
         # 라이브러리를 아예 로딩하지 않아도 돼서 더 빠르게 시작한다.
         from .plotter import plot_tdata
 
-        return plot_tdata(self, layout=layout, sync=sync, by=by, figsize=figsize,
-                          height_ratios=height_ratios, palette=palette, show=show,
-                          columns=columns, dropna=dropna)
+        if dropna is None:
+            dropna = not self._framed
+        return plot_tdata(self, layout=layout, sync=sync, sync_num=sync_num, by=by,
+                          figsize=figsize, height_ratios=height_ratios, palette=palette,
+                          show=show, columns=columns, dropna=dropna, kind=kind,
+                          theme=theme, dedup=dedup)
 
 
 # --------------------------------------------------------------------------
@@ -780,7 +974,18 @@ def _reindex_leaf(leaf: Leaf, idx: pd.DatetimeIndex, method: "str | None") -> Le
     따로따로 재색인해야 한다 — 안 그러면 ffill일 때 종목 A의 "직전 값"
     이 종목 B로 새거나, method=None이어도 서로 다른 종목의 시간축이
     한 표에 뒤섞여 버린다. 그래서 groupby로 종목별로 쪼갠 뒤 각각
-    reindex를 적용하고 다시 합친다."""
+    reindex를 적용하고 다시 합친다.
+
+    ★ 그룹 안에서도 같은 시각이 중복될 수 있다 ★
+    tick/quote/indicator처럼 같은 초에 여러 행이 남을 수 있는 데이터는,
+    symbol(그리고 label/line 등)로 다 걸러낸 뒤에도 여전히 같은
+    타임스탬프가 두 번 이상 나올 수 있다(같은 초 안에 재계산이 여러 번
+    일어난 경우 등). pandas의 reindex()는 "원본 인덱스에 중복이 있으면
+    어느 값을 새 자리에 넣어야 할지 알 수 없다"며 바로 에러를 내므로
+    (ValueError: cannot reindex on an axis with duplicate labels), 여기서
+    미리 "같은 시각이면 그중 마지막 값만 남긴다"로 정리한 뒤 reindex한다
+    — 이미 df 전체가 시간순 정렬돼 있으므로(Leaf 불변조건) "마지막"은
+    곧 "그 시각 안에서 가장 나중에 들어온 값"이다."""
     if leaf.keys:
         parts = []
         # observed=True : 카테고리 컬럼으로 groupby할 때, 실제 데이터에
@@ -791,6 +996,7 @@ def _reindex_leaf(leaf: Leaf, idx: pd.DatetimeIndex, method: "str | None") -> Le
             # kv가 그냥 값 하나("005930")로 오고, 여러 개면 튜플로 온다 —
             # 아래 zip(leaf.keys, kv) 에서 항상 튜플로 다루기 위해 통일한다.
             kv = kv if isinstance(kv, tuple) else (kv,)
+            g = _dedup_index_keep_last(g)
             # reindex(idx, method=...) : 인덱스를 통째로 idx로 바꾼다.
             # method="ffill"이면 idx에는 있지만 원래 없던 시각을 "바로
             # 이전 값"으로 채우고, method=None이면 그 자리를 그냥 NaN으로
@@ -808,10 +1014,19 @@ def _reindex_leaf(leaf: Leaf, idx: pd.DatetimeIndex, method: "str | None") -> Le
         for k in leaf.keys:
             df[k] = df[k].astype("category")
     else:
-        df = leaf.df.reindex(idx, method=method)
+        df = _dedup_index_keep_last(leaf.df).reindex(idx, method=method)
 
     df.index = df.index.rename(TIME)
     return leaf.with_df(df)
+
+
+def _dedup_index_keep_last(df: pd.DataFrame) -> pd.DataFrame:
+    """같은 시각(인덱스)이 여러 번 나오면 그중 마지막 행만 남긴다.
+    reindex()가 중복 인덱스를 못 받아들이는 문제를 _reindex_leaf()에서
+    풀 때 쓴다."""
+    if df.index.is_unique:
+        return df
+    return df[~df.index.duplicated(keep="last")]
 
 
 def _sync_leaf(leaf: Leaf, t: pd.DatetimeIndex, how: str) -> Leaf:

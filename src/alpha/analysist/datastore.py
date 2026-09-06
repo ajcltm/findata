@@ -75,7 +75,9 @@ from __future__ import annotations
 #   타입 힌트를 조금 더 자유롭게 쓸 수 있게 해주는 문법적 편의다.
 
 import json      # 문자열로 저장된 리스트(JSON)를 다시 파이썬 리스트로 되돌릴 때 씀
+import re        # end="2024-01-15"처럼 날짜만 왔는지 판별할 때 씀(_to_iso)
 import sqlite3   # 파이썬 표준 라이브러리 — SQLite 데이터베이스 파일에 접속하는 도구
+import time      # _connect() 재시도 사이에 짧게 대기할 때 씀
 from pathlib import Path            # 파일 경로를 다루는 표준 도구 (문자열보다 안전/편리)
 from typing import Optional, Sequence, Union
 # ↑ 타입 힌트 전용 도구들.
@@ -190,6 +192,12 @@ class DataStore:
         self.simul_mode = simul_mode
 
     # ── 연결 ─────────────────────────────────────────────────
+    # _connect()가 "진짜 열리는지" 확인하다 실패했을 때 몇 번, 얼마나
+    # 간격을 두고 재시도할지. 아래 _connect() docstring의 "재시도" 설명
+    # 참고 — 매번 대기 시간을 2배로 늘려간다(0.2, 0.4, 0.8, 1.6초).
+    _CONNECT_RETRIES = 5
+    _CONNECT_RETRY_DELAY = 0.2
+
     def _connect(self) -> sqlite3.Connection:
         """읽기 전용으로만 연다.
 
@@ -198,7 +206,24 @@ class DataStore:
           있다(WAL 모드라 동시 읽기는 안전하다). 여기서는 절대 쓰지
           않을 것이므로 mode=ro 로 명시해, 실수로 쓰기가 나가는 것도
           막고 '분석 코드가 원본 데이터를 훼손했다' 는 사고 가능성 자체를
-          없앤다."""
+          없앤다.
+
+        ★ 가끔 "unable to open database file"이 나는 이유, 그리고 재시도 ★
+          WAL 모드 DB는 쓰기 쪽(recorder)이 체크포인트를 걸거나 막
+          재시작한 순간과 겹치면 -shm(공유메모리) 파일이 잠깐 없어졌다
+          다시 생기는 빈틈이 있다. 읽기 전용 연결은 그 파일을 스스로
+          새로 못 만들기 때문에, 하필 그 빈틈에 걸리면
+          sqlite3.OperationalError("unable to open database file")가
+          난다 — 타이밍 문제라 항상 나는 게 아니라 가끔 난다(DB Browser
+          같은 GUI 툴로 파일을 직접 여닫을 때 체크포인트가 걸려서 이
+          빈틈이 생기는 경우가 흔하다).
+
+          sqlite3.connect() 자체는 파일을 그 순간 바로 열지 않고 첫
+          실제 접근 때 비로소 여는 지연 방식이라(연결 객체를 만드는 것
+          자체는 거의 항상 성공한다), connect() 호출만 재시도해서는
+          소용없다 — 그래서 여기서 바로 가벼운 쿼리(SELECT 1)를 한 번
+          날려 "진짜 열리는지"까지 확인하고, 실패하면 짧게 기다렸다가
+          다시 처음부터(연결부터) 재시도한다."""
         # 초보자 참고: 이름이 밑줄(_)로 시작하는 메서드/함수(_connect,
         # _build_query 등)는 "이 클래스/파일 내부에서만 쓰려고 만든
         # 것"이라는 파이썬의 관례다. 강제로 막혀 있진 않지만, 바깥에서
@@ -214,7 +239,21 @@ class DataStore:
         # 주고 uri=True 를 켜면, 그 파일을 "읽기 전용"으로만 연다 —
         # 이 연결로는 INSERT/UPDATE 같은 쓰기 명령을 실행해도 에러가 난다.
         uri = f"file:{self.path.resolve().as_posix()}?mode=ro"
-        return sqlite3.connect(uri, uri=True)
+
+        delay = self._CONNECT_RETRY_DELAY
+        last_err: Optional[sqlite3.OperationalError] = None
+        for attempt in range(self._CONNECT_RETRIES):
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                conn.execute("SELECT 1")   # 지금 이 자리에서 "진짜로" 열어본다
+                return conn
+            except sqlite3.OperationalError as e:
+                conn.close()
+                last_err = e
+                if attempt < self._CONNECT_RETRIES - 1:
+                    time.sleep(delay)
+                    delay *= 2
+        raise last_err
 
     def tables(self) -> list[str]:
         """이 DB 파일에 실제로 존재하는 테이블 이름.
@@ -308,7 +347,7 @@ class DataStore:
             values.append(_to_iso(start))
         if end is not None:
             clauses.append(f"{time_col} <= ?")
-            values.append(_to_iso(end))
+            values.append(_to_iso(end, end=True))
 
         if where:
             # 사용자가 직접 준 조건은 괄호로 한 번 감싸서 다른 AND 조건들과
@@ -567,18 +606,40 @@ def _and_clauses(*pairs: tuple[str, Optional[object]]) -> tuple[Optional[str], l
     return " AND ".join(clauses), values
 
 
-def _to_iso(value) -> str:
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _to_iso(value, end: bool = False) -> str:
     """start/end 로 받은 값(문자열/date/datetime)을 SQL 비교용 문자열로.
 
     문자열이면 그대로 믿는다 — SqliteSink 가 저장한 ISO 문자열
     ("2024-01-15T09:30:00")과 사전순 비교가 곧 시간순 비교이므로,
-    "2024-01-15"처럼 앞부분만 줘도 그날 00:00:00 이후로 정확히 걸린다."""
+    "2024-01-15"처럼 앞부분만 줘도 start 쪽에서는 그날 00:00:00 이후로
+    정확히 걸린다.
+
+    ★ end 는 다르다 — 날짜만 주면 "그날 전체"가 아니라 "자정"으로 좁혀진다 ★
+    문자열 비교에서는 같은 접두어일 때 더 긴 문자열이 더 "큰" 값이다
+    (예: "2024-01-15T09:00:00" > "2024-01-15"). 그래서 end="2024-01-15"
+    로 주면 "dt <= '2024-01-15'" 조건이 그날 자정(00:00:00 그 순간) 말고는
+    전부 걸러버린다 — start와 end를 같은 날짜로 줘서 "그날 하루"를
+    조회하면 결과가 텅 비는 사고가 바로 여기서 난다. 그래서 end 쪽에
+    시각 없이 날짜만 왔을 때는, 그날의 마지막 순간(23:59:59.999999)으로
+    밀어서 "그날 전체"가 실제로 포함되게 만든다. 이미 시각까지 적어서
+    준 값(예: "2024-01-15 09:00")은 사용자가 정확히 그 지점을 의도한
+    것이니 그대로 둔다."""
     if isinstance(value, str):
+        if end and _DATE_ONLY_RE.match(value.strip()):
+            return f"{value.strip()}T23:59:59.999999"
         return value
     if hasattr(value, "isoformat"):
         # hasattr(값, "isoformat") : 그 값이 isoformat이라는 기능(메서드)을
         # 가지고 있는지 확인한다. datetime/date 객체들은 이 기능으로
         # 자기 자신을 "2024-01-15T09:30:00" 같은 표준 문자열로 바꿔준다.
+        if end and not hasattr(value, "hour"):
+            # datetime.date는 시각 정보가 아예 없다(datetime.datetime만
+            # hour 속성을 가진다) — 문자열로 날짜만 준 경우와 똑같은
+            # 문제라 똑같이 그날 마지막 순간으로 밀어준다.
+            return f"{value.isoformat()}T23:59:59.999999"
         return value.isoformat()
     raise TypeError(f"start/end 는 문자열이나 date/datetime 이어야 합니다: {value!r}")
 
