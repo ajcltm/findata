@@ -44,7 +44,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from queue import Empty, Full, Queue
-from typing import Callable, Optional, Type
+from typing import Callable, Optional, Sequence, Type
 
 log = logging.getLogger("recorder")
 
@@ -61,6 +61,7 @@ class Channel:
     batch: int = 500                # 이만큼 모이면 쓴다
     max_age: float = 5.0            # 또는 이만큼 지나면 쓴다(초)
     extra: dict = field(default_factory=dict)   # 객체에 없는 공통 컬럼
+    exclude: frozenset = field(default_factory=frozenset)   # 객체엔 있지만 저장은 안 할 컬럼
 
     buf: list = field(default_factory=list)
     last_flush: float = field(default_factory=time.monotonic)
@@ -101,7 +102,8 @@ class Recorder:
     # ───────── 구독 ─────────
     def subscribe(self, dtype: Type, sink, name: Optional[str] = None,
                   batch: int = 500, max_age: float = 5.0,
-                  extra: Optional[dict] = None) -> Callable[[object], bool]:
+                  extra: Optional[dict] = None,
+                  exclude: Optional[Sequence[str]] = None) -> Callable[[object], bool]:
         """데이터 타입 하나를 저장하도록 등록하고 put 함수를 돌려준다.
 
             put = rec.subscribe(Tick, SqliteSink("kis.db"), name="ticks")
@@ -119,6 +121,25 @@ class Recorder:
             Fill 에는 strategy_id 가 없다. 전략마다 따로 구독하면서
             extra={"strategy_id": sid} 를 주면 저장할 때 붙는다.
 
+        ■ exclude — 객체에는 있지만 저장은 안 할 컬럼
+            객체(Tick 등)와 그걸 쓰는 코드는 그대로 두고, "저장할 때만"
+            특정 필드를 뺀다. 예를 들어 Tick.raw(원본 KIS 응답 JSON)는
+            kis_data.db 에 이미 원본 그대로 따로 남기 때문에(kis_engine.py
+            의 별도 레코더), alpha_data.db 계열의 tick 테이블에까지 또
+            중복으로 넣을 필요가 없다 — 오히려 한 행이 커져서 symbol로
+            걸러 조회할 때마다 디스크에서 더 많은 페이지를 읽게 만든다
+            (raw 하나가 나머지 컬럼을 전부 합친 것보다 훨씬 크다).
+
+                rec.subscribe(Tick, SqliteSink("alpha_data.db"),
+                             name="tick", exclude=("raw",))
+
+            테이블은 이미 raw 컬럼을 갖고 있어도 상관없다 — INSERT에서
+            그 컬럼만 빠지면 SQLite가 그 행의 raw를 NULL로 채우고,
+            NULL은 레코드에 헤더 1바이트 수준으로만 저장되므로 사실상
+            "그 컬럼이 없는 것"과 비슷한 크기가 된다(과거에 이미 raw를
+            채워 넣은 행까지 작아지진 않는다 — 그건 ALTER TABLE DROP
+            COLUMN + VACUUM 같은 별도 마이그레이션이 필요하다).
+
         ■ 같은 타입을 여러 번 구독할 수 있다
             rec.subscribe(Tick, SqliteSink(...),  name="ticks")
             rec.subscribe(Tick, ParquetSink(...), name="ticks")
@@ -126,7 +147,8 @@ class Recorder:
         """
         ch = Channel(dtype=dtype, sink=sink,
                      name=name or dtype.__name__.lower(),
-                     batch=batch, max_age=max_age, extra=dict(extra or {}))
+                     batch=batch, max_age=max_age, extra=dict(extra or {}),
+                     exclude=frozenset(exclude or ()))
         self.channels.setdefault(dtype, []).append(ch)
         log.info("구독 등록 %s → %s (batch=%d, max_age=%.1fs)",
                  ch.desc, type(sink).__name__, batch, max_age)
@@ -267,11 +289,17 @@ class Recorder:
         batch, ch.buf = ch.buf, []
         ch.last_flush = time.monotonic()
         try:
-            if ch.extra:
-                # 객체에 없는 공통 컬럼(strategy_id 등)을 붙인다.
-                # extra 가 없으면 객체 리스트를 그대로 넘겨 변환을 아낀다.
+            if ch.extra or ch.exclude:
+                # 객체에 없는 공통 컬럼(strategy_id 등)을 붙이거나, 있는
+                # 컬럼 중 저장은 안 할 것(raw 등)을 뺀다. 둘 다 없으면
+                # 객체 리스트를 그대로 넘겨 변환을 아낀다.
                 from alpha.recording.sinks import _to_row
-                batch = [{**_to_row(r), **ch.extra} for r in batch]
+                def _row(r):
+                    d = {**_to_row(r), **ch.extra}
+                    for key in ch.exclude:
+                        d.pop(key, None)
+                    return d
+                batch = [_row(r) for r in batch]
             ch.sink.write(batch, ch.name)
             ch.written += len(batch)
             ch.errors = 0

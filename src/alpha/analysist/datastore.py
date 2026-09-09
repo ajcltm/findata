@@ -144,23 +144,6 @@ _BOOL_COLUMNS: dict[str, tuple[str, ...]] = {
     "notice": ("rejected",),
 }
 
-# "무거운" 컬럼 — 값 자체는 거의 안 쓰는데 용량은 그 행의 대부분을
-# 차지하는 컬럼(예: tick.raw는 KIS 응답 원본 JSON을 그대로 문자열로
-# 담아둔 것으로, 실측상 한 행 평균 1.2KB — 나머지 컬럼을 전부 합친 것의
-# 10배가 넘는다). SELECT * 로 매번 이걸 같이 읽어오면, symbol/기간으로
-# 걸러낸 행이 몇 안 되더라도(예: 3만 행) 디스크에서 실제로 읽어와야 하는
-# 바이트량은 그 몇 배로 부풀어 있다 — 인덱스가 옳게 타고 있어도 이 값
-# 자체를 안 쓰면 순전히 낭비다.
-#
-# load()/각 전용 메서드는 기본적으로 이 컬럼들을 SELECT에서 아예 뺀다
-# (SQL 단계에서 빼야 진짜로 안 읽어온다 — 받아온 뒤 DataFrame에서
-# drop() 하는 건 이미 디스크 I/O를 다 치른 뒤라 소용없다). 원본이
-# 필요하면(예: 그때 실제로 어떤 필드가 왔는지 디버깅) include_heavy=True
-# (또는 ticks()의 include_raw=True)로 명시적으로 켠다.
-_HEAVY_COLUMNS: dict[str, tuple[str, ...]] = {
-    "tick": ("raw",),
-}
-
 
 class DataStore:
     """alpha_data.db(실전) / mock_data.db(모의, 실제 시세) /
@@ -296,7 +279,8 @@ class DataStore:
     def load(self, table: str, symbol: Symbols = None,
              start=None, end=None, where: Optional[str] = None,
              params: Sequence = (), index: bool = True,
-             parse_json: bool = True, include_heavy: bool = False) -> pd.DataFrame:
+             parse_json: bool = True,
+             exclude: Optional[Sequence[str]] = None) -> pd.DataFrame:
         """테이블 하나를 DataFrame으로.
 
         symbol   문자열 하나 또는 목록. 없으면 전 종목.
@@ -312,10 +296,15 @@ class DataStore:
                  (groupby 등에서 컬럼으로 쓰고 싶을 때).
         parse_json  True(기본)면 리스트/튜플이었던 컬럼(quote의 asks 등)을
                     다시 파이썬 리스트로 풀어준다.
-        include_heavy  False(기본)면 _HEAVY_COLUMNS 에 등록된, 거의 안
-                    쓰는데 용량만 큰 컬럼(예: tick.raw)을 SELECT 자체에서
-                    빼서 안 읽어온다(디스크 I/O를 실제로 줄인다 — 받아온
-                    뒤 버리는 게 아니다). 그 값이 정말 필요할 때만 True.
+        exclude  None(기본)이면 전 컬럼. 이름을 나열하면(예:
+                    exclude=["raw"]) 그 컬럼들을 SELECT 자체에서 빼서
+                    안 읽어온다(디스크 I/O를 실제로 줄인다 — 받아온 뒤
+                    DataFrame에서 drop() 하는 건 이미 디스크 I/O를 다
+                    치른 뒤라 소용없다). 어떤 컬럼이 무거운지는 테이블마다
+                    다르고 recording 쪽 사정에 달려 있어서(예: 예전엔
+                    tick.raw가 그랬다 — 지금은 recorder.py의 exclude=로
+                    애초에 안 쌓는다) 여기서 특정 컬럼을 기본값으로 미리
+                    정해두지 않는다. 필요할 때 직접 지정한다.
 
         ★ where/params 에 왜 "?"를 쓰는가(SQL 인젝션 방지) ★
           "price > 70000" 처럼 값을 문자열에 직접 끼워 넣지 않고
@@ -327,7 +316,7 @@ class DataStore:
             raise ValueError(f"모르는 테이블: {table!r} (알려진 것: {', '.join(self.TABLES)})")
 
         with self._connect() as conn:
-            select = self._select_columns(conn, table, include_heavy)
+            select = self._select_columns(conn, table, exclude)
             sql, sql_params = self._build_query(table, symbol, start, end, where, params, select=select)
             # pandas의 read_sql_query 는 "SQL을 실행하고, 결과를 바로
             # DataFrame(표)으로 만들어주는" 함수다. sqlite3로 커서를 열고
@@ -343,24 +332,25 @@ class DataStore:
         return df
 
     # ── SQL 조립 ─────────────────────────────────────────────
-    def _select_columns(self, conn: sqlite3.Connection, table: str, include_heavy: bool) -> str:
+    def _select_columns(self, conn: sqlite3.Connection, table: str,
+                        exclude: Optional[Sequence[str]]) -> str:
         """SELECT 절에 뭘 나열할지 결정한다.
 
-        _HEAVY_COLUMNS 에 등록된 게 없는 테이블이거나 include_heavy=True
-        면 그냥 "*" — 지금까지와 동일하게 동작한다. 뺄 게 있으면
-        PRAGMA table_info로 "지금 이 테이블에 실제로 있는" 컬럼 이름을
-        받아와서, 그중 무거운 것만 제외하고 나머지를 나열한다 — 컬럼을
-        여기서 새로 정의하지 않는다는 원칙(파일 맨 위 docstring)을 그대로
-        지키면서, 특정 컬럼 하나만 SQL 단계에서 안 읽어오게 하는 방법이다.
-        (PRAGMA 결과는 사용자 입력이 아니라 DB 스키마 자체이므로, 따옴표로
-        감싸 SELECT 절에 그대로 이어 붙여도 인젝션 위험이 없다.)"""
-        heavy = _HEAVY_COLUMNS.get(table, ())
-        if include_heavy or not heavy:
+        exclude가 없으면 그냥 "*" — 지금까지와 동일하게 동작한다. 뺄 게
+        있으면 PRAGMA table_info로 "지금 이 테이블에 실제로 있는" 컬럼
+        이름을 받아와서, 그중 exclude에 있는 것만 제외하고 나머지를
+        나열한다 — 컬럼을 여기서 새로 정의하지 않는다는 원칙(파일 맨 위
+        docstring)을 그대로 지키면서, 호출하는 쪽이 그때그때 지정한
+        컬럼만 SQL 단계에서 안 읽어오게 하는 방법이다. (PRAGMA 결과는
+        사용자 입력이 아니라 DB 스키마 자체이므로, 따옴표로 감싸 SELECT
+        절에 그대로 이어 붙여도 인젝션 위험이 없다.)"""
+        if not exclude:
             return "*"
+        exclude = set(exclude)
         cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-        kept = [c for c in cols if c not in heavy]
+        kept = [c for c in cols if c not in exclude]
         if not kept:
-            return "*"   # 혹시 다 빠지면(스키마가 예상과 다르면) 안전하게 전체를 돌려준다
+            return "*"   # 혹시 다 빠지면(지정이 잘못됐으면) 안전하게 전체를 돌려준다
         return ", ".join(f'"{c}"' for c in kept)
 
     def _build_query(self, table, symbol, start, end, where, params, select: str = "*"):
@@ -477,21 +467,22 @@ class DataStore:
     # 결과를 Tdata로 감싸서 돌려준다(ohlcv/indicator_pivot 제외 — 이
     # 둘은 특수 목적이라 그냥 DataFrame을 돌려준다, 아래 설명 참고).
     def ticks(self, symbol: Symbols = None, start=None, end=None,
-              include_raw: bool = False) -> Tdata:
+              exclude: Optional[Sequence[str]] = None) -> Tdata:
         """체결(tick) 데이터. symbol 하나 이상 줄 수 있다.
 
-        include_raw  False(기본)면 raw(KIS 응답 원본 JSON) 컬럼을 SQL
-                    단계에서부터 빼고 읽어온다. raw는 한 행 평균 1.2KB로
-                    나머지 컬럼을 다 합친 것보다 훨씬 커서(실측: tick
-                    테이블 용량의 대부분을 차지), symbol/기간으로 걸러도
-                    실제로 디스크에서 읽어와야 하는 양을 크게 부풀린다 —
-                    원본 응답 필드를 직접 봐야 할 때만 True로 켠다."""
-        df = self.load("tick", symbol=symbol, start=start, end=end, include_heavy=include_raw)
+        exclude  안 읽어올 컬럼 이름들(예: exclude=["raw"]) — load()의
+                    같은 이름 인자를 그대로 전달한다. 지금은 recorder.py
+                    쪽에서 Tick.raw 자체를 애초에 안 쌓게 해뒀지만(raw는
+                    kis_data.db 에 이미 원본이 따로 있다), 그 전에 쌓인
+                    과거 행이나 다른 무거운 컬럼이 생기면 여기로 뺄 수
+                    있다."""
+        df = self.load("tick", symbol=symbol, start=start, end=end, exclude=exclude)
         return self._tdata("tick", df, keys=("symbol",))
 
-    def quotes(self, symbol: Symbols = None, start=None, end=None) -> Tdata:
-        """호가(quote) 데이터."""
-        df = self.load("quote", symbol=symbol, start=start, end=end)
+    def quotes(self, symbol: Symbols = None, start=None, end=None,
+               exclude: Optional[Sequence[str]] = None) -> Tdata:
+        """호가(quote) 데이터. exclude는 ticks() 참고."""
+        df = self.load("quote", symbol=symbol, start=start, end=end, exclude=exclude)
         return self._tdata("quote", df, keys=("symbol",))
 
     def bars(self, symbol: Symbols = None, seconds: Optional[int] = None,
@@ -536,9 +527,10 @@ class DataStore:
         df = self.load("fill", symbol=symbol, start=start, end=end)
         return self._tdata("fill", df, keys=("symbol",))
 
-    def notices(self, symbol: Symbols = None, start=None, end=None) -> Tdata:
-        """체결통보 외 일반 알림(notice, 주문 거부 등) 기록."""
-        df = self.load("notice", symbol=symbol, start=start, end=end)
+    def notices(self, symbol: Symbols = None, start=None, end=None,
+                exclude: Optional[Sequence[str]] = None) -> Tdata:
+        """체결통보 외 일반 알림(notice, 주문 거부 등) 기록. exclude는 ticks() 참고."""
+        df = self.load("notice", symbol=symbol, start=start, end=end, exclude=exclude)
         return self._tdata("notice", df, keys=("symbol",))
 
     def indicators(self, symbol: Symbols = None, label: Optional[str] = None,

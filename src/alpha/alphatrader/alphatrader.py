@@ -193,11 +193,18 @@ class AlphaTrader:
         self.add_recording(Trade, alpha_sink, name="trade")
         self.add_recording(IndicatorSnapshot, alpha_sink, name="indicator")
         self.add_recording(events.Bar, alpha_sink, name="bar")
-        self.add_recording(events.Tick, alpha_sink, name="tick")
-        self.add_recording(events.Quote, alpha_sink, name="quote")
+        # exclude=("raw",) — Tick/Quote/Notice.raw(원본 KIS 응답)는
+        # kis_engine.py 의 별도 레코더가 kis_data(.sim).db 에 이미 그대로
+        # 남긴다(build_recording(), __main__.py). 여기 또 넣으면 완전한
+        # 중복이고, 한 행이 커져서(raw 하나가 나머지 컬럼을 다 합친 것보다
+        # 훨씬 큼) symbol로 걸러 조회할 때마다 디스크에서 읽어야 하는
+        # 페이지 수가 크게 늘어난다(datastore.py 관련 성능 논의 참고).
+        # 객체(Tick 등)와 그걸 쓰는 전략 코드는 그대로다 — 저장에서만 뺀다.
+        self.add_recording(events.Tick, alpha_sink, name="tick", exclude=("raw",))
+        self.add_recording(events.Quote, alpha_sink, name="quote", exclude=("raw",))
         # events.Notice — 실전(KiSEngine)/모의(SimBroker) 체결통보가 이제
         # 하나의 정규화된 타입이라 여기 한 번만 등록하면 둘 다 잡힌다.
-        self.add_recording(events.Notice, alpha_sink, name="notice")
+        self.add_recording(events.Notice, alpha_sink, name="notice", exclude=("raw",))
 
         # StrategySpec — 전략마다 자체 이벤트가 없는 등록 정보(ticks/quotes/
         # bars/allocation)를 실행 시각과 함께 한 행씩 남긴다. 이번 실행에

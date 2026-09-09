@@ -444,6 +444,20 @@ class Tdata(FinanceMixin):
         # 그대로"인 하나의 튜플이다.
         return (self._base, *self._others)
 
+    @property
+    def names(self) -> list[str]:
+        """지금 등록된 leaf 이름 목록(base 포함, 순서 유지, 중복 제거).
+
+        join()/drop()에 num 대신 이름으로 뭘 넘길지 고를 때 먼저 이걸
+        찍어본다: td.names -> ["bar", "indicator@OFI_KF", ...]
+
+        같은 이름이 add()로 여러 장 들어와 있어도(아직 staged()로 합치기
+        전) 여기서는 한 번만 보여준다 — "지금 뭘 다루고 있는지" 목록이
+        필요한 거지, 몇 장씩 겹쳐 있는지는 이 목록의 관심사가 아니다."""
+        # dict.fromkeys(...) : columns()에서도 쓴 것과 같은 트릭 — 순서는
+        # 유지하면서 중복만 없앤다.
+        return list(dict.fromkeys(lf.name for lf in self.leaves))
+
     def select(self, num: int) -> Leaf:
         """others 의 num 번째. -1 은 기준 데이터."""
         return self._base if num < 0 else self._others[num]
@@ -516,6 +530,124 @@ class Tdata(FinanceMixin):
             if len(bad):
                 out[name] = bad
         return out
+
+    def _resolve_other_index(self, sel: "int | str") -> int:
+        """num(others 안의 위치, 0부터) 또는 leaf 이름으로 others 안의
+        인덱스 하나를 찾는다. drop()/join()이 공유하는 내부 헬퍼다.
+
+        base는 대상이 아니다 — num은 항상 others 기준이고(leaves 전체가
+        아니다), 이름도 others 중에서만 찾는다. base를 지우거나 base에
+        합치는 건 애초에 말이 안 된다(base는 항상 있어야 하는 기준점).
+
+        이름이 여러 개에 걸쳐 있으면(아직 staged()로 합치기 전이라 같은
+        이름의 leaf가 여러 장 있을 수 있다) 어느 걸 말하는지 알 수 없으므로
+        에러를 낸다 — num으로 정확히 짚어달라고 안내한다."""
+        if isinstance(sel, int):
+            if not (0 <= sel < len(self._others)):
+                raise IndexError(
+                    f"others 인덱스 범위를 벗어남: {sel} "
+                    f"(0~{len(self._others) - 1}, others 개수={len(self._others)})"
+                )
+            return sel
+        matches = [i for i, lf in enumerate(self._others) if lf.name == sel]
+        if not matches:
+            raise KeyError(f"이름 {sel!r} 을(를) 가진 leaf가 없습니다. 등록된 이름: {self.names}")
+        if len(matches) > 1:
+            raise KeyError(
+                f"이름 {sel!r} 을(를) 가진 leaf가 {len(matches)}개 있어 특정할 수 없습니다 "
+                "(staged() 전이라 같은 이름이 여러 장 있을 수 있음) — num(정수 인덱스)으로 지정하세요."
+            )
+        return matches[0]
+
+    def drop(self, sel: "int | str") -> "Tdata":
+        """num(others 안의 위치, 0부터) 또는 leaf 이름으로 지정한 leaf
+        하나를 others에서 뺀 새 Tdata를 반환한다.
+
+            td.drop(0)                     # others[0] 제거
+            td.drop("indicator@OFI_KF")    # 그 이름의 leaf 제거
+
+        base는 지울 수 없다(_resolve_other_index 참고) — base를 바꾸고
+        싶으면 다른 Tdata를 새로 만들어야 한다. join()이 병합 후에
+        내부적으로 하는 것과 같은 동작을 직접 부르고 싶을 때 쓴다."""
+        idx = self._resolve_other_index(sel)
+        remaining = self._others[:idx] + self._others[idx + 1:]
+        return self._spawn(self._base, remaining)
+
+    def join(self, sel: "int | str", how: str = "inner",
+            dedup: "str | None" = "last") -> "Tdata":
+        """others 중 하나(num 또는 이름으로 지정)를 base의 시간축에 맞춰
+        base.df 옆에 컬럼으로 붙이고, 그 leaf는 others에서 뺀다 —
+        "겹쳐 그리던 두 leaf를 이제 하나의 표로 합친다"는 동작이다.
+
+        새 병합 로직을 따로 만들지 않고 이미 있는 staged()/time_sync()를
+        그대로 체인으로 이어서 구현한다:
+            1. staged(dedup=dedup) — 합칠 leaf 안에 같은 (t,*keys)가
+               여러 개 있으면(tick처럼) 먼저 하나로 줄인다.
+            2. time_sync(how=how) — base의 시간축(times)을 기준으로
+               그 leaf를 맞춘다(다른 others는 안 건드리도록, base와
+               이 leaf 둘만 담은 임시 Tdata에서 부른다).
+            3. 맞춰진 그 leaf의 값 컬럼들을 base.df에 옆으로 붙인다.
+
+        how : time_sync()와 같다. "inner"(기본, base 시간축에 있는
+              시각만 남김) 또는 "ffill"(base 시간축 전체로 직전값 채움).
+        dedup : "last"(기본)/"first"/"max"/"min" 또는 None(끄기) —
+              staged()의 dedup과 같다.
+
+        합칠 leaf(target)의 keys는 base의 keys와 같거나(둘 다 예:
+        ("symbol",) — 이때는 (t, *keys) 기준으로 정확히 맞춰 붙인다)
+        비어 있어야 한다(예: 벤치마크처럼 종목 구분 없는 단일 시계열 —
+        이때는 시간만으로 base의 모든 종목에 똑같이 붙는다). keys가
+        있는데 base와 다르면(예: base는 symbol, target은 label) 한
+        시각에 여러 행이 뒤섞여 잘못 합쳐질 수 있어 여기서 바로 에러를
+        낸다 — where()/tslice() 등으로 종목 하나로 좁힌 뒤 다시 시도한다.
+
+        컬럼 이름이 이미 base에 있으면 "leaf이름.컬럼이름"으로 접두사를
+        붙여 구분한다(덮어쓰지 않는다).
+
+            td.join(0)                                  # others[0]을 base에 합침
+            td.join("indicator@OFI_KF", how="ffill", dedup="max")
+        """
+        idx = self._resolve_other_index(sel)
+        target = self._others[idx]
+        if target.keys and target.keys != self._base.keys:
+            raise ValueError(
+                f"[{target.name}] keys={target.keys} 가 base의 keys={self._base.keys} 와 달라 "
+                "옆으로 합칠 수 없습니다(한 시각에 여러 종목이 뒤섞여 잘못 합쳐질 수 있음). "
+                "먼저 종목 하나로 좁히거나(where()/tslice() 등) keys를 맞춰서 다시 시도하세요."
+            )
+
+        # base와 target 둘만 담은 임시 Tdata — 다른 others는 이 병합과
+        # 무관하므로 손대지 않는다(staged()/time_sync()는 자기가 가진
+        # 모든 leaf에 적용되는 메서드라, 여기서 격리해두지 않으면 엉뚱한
+        # 다른 leaf까지 같이 재계산된다).
+        pair = Tdata(self._base, (target,), self.resample_rule)
+        if dedup is not None:
+            base_leaf, target_leaf = pair.staged(dedup=dedup)
+            pair = Tdata(base_leaf, (target_leaf,), self.resample_rule)
+        synced_base, synced_target = pair.time_sync(how=how).leaves
+
+        value_cols = [c for c in synced_target.df.columns if c not in synced_target.keys]
+        # 이름이 겹치는 컬럼만 접두사를 붙인다 — 안 겹치면 원래 이름 그대로 둔다.
+        rename = {c: f"{synced_target.name}.{c}" for c in value_cols
+                 if c in synced_base.df.columns}
+
+        if synced_base.keys and synced_target.keys:
+            # 둘 다 같은 keys(예: symbol)를 가진 다종목 데이터 — 시간
+            # 인덱스만으로 합치면 같은 시각의 다른 종목끼리 잘못 섞일 수
+            # 있으므로, (t, *keys) 전부를 기준으로 정확히 맞춰 합친다.
+            right = (synced_target.df.reset_index()[[TIME, *synced_target.keys, *value_cols]]
+                    .rename(columns=rename))
+            merged_df = (synced_base.df.reset_index()
+                        .merge(right, on=[TIME, *synced_base.keys], how="left")
+                        .set_index(TIME))
+        else:
+            # target이 keys 없는 단일 시계열(예: 벤치마크) — 시간만으로 붙인다.
+            incoming = synced_target.df[value_cols].rename(columns=rename)
+            merged_df = synced_base.df.join(incoming, how="left")
+
+        new_base = synced_base.with_df(merged_df)
+        remaining = self._others[:idx] + self._others[idx + 1:]
+        return self._spawn(new_base, remaining)
 
     # -- 병합(스테이징) ----------------------------------------------------
     def staged(self, by: Sequence[str] | None = None,
