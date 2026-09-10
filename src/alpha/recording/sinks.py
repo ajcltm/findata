@@ -173,11 +173,27 @@ _INDEX_HINTS: tuple[tuple[str, ...], ...] = (
     ("stock_code", "business_hour"),   # kis_data.db 원본(OrderBook)
 )
 
+# 특정 테이블에만 거는 인덱스. _INDEX_HINTS 는 "컬럼만 있으면 어느
+# 테이블이든 건다"라서, 큰 테이블에는 굳이 안 달고 싶은 조합을 여기로 뺀다.
+#
+# (dt, symbol) — "그날 데이터가 있는 종목 목록"만 뽑는 조회(dt 범위만
+# 걸고 symbol 은 안 건다)를 위해 필요하다. (symbol, dt) 인덱스는 symbol
+# 이 선두라 이 조회엔 못 쓰여서 테이블 전체를 훑는다(dt 가 선두여야
+# 날짜 구간으로 바로 seek 이 된다). tick/quote(수백만 행)에만 건다 —
+# indicator(수천만 행)는 같은 종목 목록을 tick 에서 얻을 수 있어(레코더가
+# 같은 유니버스로 tick/quote/indicator 를 함께 구독한다) ~1.7GB 짜리
+# 인덱스를 더 다는 값을 치를 이유가 없다.
+_TABLE_INDEX_HINTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "tick":  (("dt", "symbol"),),
+    "quote": (("dt", "symbol"),),
+}
+
 
 def _ensure_indexes(conn: sqlite3.Connection, table: str, columns) -> None:
-    """_INDEX_HINTS 중 이 테이블에 실제로 있는 컬럼 조합만 골라 인덱스를 건다."""
+    """_INDEX_HINTS(범용) + _TABLE_INDEX_HINTS[table](이 테이블 전용) 중
+    이 테이블에 실제로 있는 컬럼 조합만 골라 인덱스를 건다."""
     cols = set(columns)
-    for hint in _INDEX_HINTS:
+    for hint in (*_INDEX_HINTS, *_TABLE_INDEX_HINTS.get(table, ())):
         if not cols.issuperset(hint):
             continue
         idx_name = f"idx_{table}_{'_'.join(hint)}"

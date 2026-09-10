@@ -275,6 +275,65 @@ class DataStore:
         # for 반복문 + append() 를 한 줄로 줄여 쓴 것과 같다.
         return sorted(r[0] for r in rows)
 
+    def sql(self, query: str, params: Sequence = ()) -> "tuple[list, list[str] | None]":
+        """임의의 SQL을 그대로 실행하고 sqlite3 결과를 그대로 돌려준다 —
+        (행들, 컬럼명들) 튜플.
+
+        ★ 이건 "탈출구"다 ★
+          load()나 ticks()/indicators() 같은 전용 메서드는 "테이블 하나를
+          symbol/기간으로 걸러 시계열로" 라는 정해진 모양만 다룬다. 그
+          틀을 벗어나는 조회 — DISTINCT, GROUP BY, 집계(COUNT/MIN/MAX),
+          조인, 서브쿼리, PRAGMA, sqlite_master 뒤지기 등 — 는 여기로
+          SQL을 그대로 넣어서 한다. 매번 "그날 데이터 있는 symbol"
+          같은 일회성 질문마다 전용 메서드를 만들지 않기 위한 것이다.
+
+        ★ 안전한 이유 ★
+          _connect()가 읽기 전용(mode=ro)으로만 열기 때문에, 여기에
+          INSERT/UPDATE/DELETE/DROP 같은 쓰기 SQL을 넣으면 sqlite3가
+          거부한다("attempt to write a readonly database"). 그래서 임의
+          SQL을 열어줘도 원본 데이터가 훼손될 길이 없다.
+
+        ★ load()와 뭐가 다른가 — 아무것도 안 건드린다 ★
+          load()는 받아온 뒤 datetime 파싱 / DatetimeIndex 세우기 / JSON
+          디코딩 / bool 복원까지 해준다. sql()은 그 후처리를 하나도 안
+          한다 — sqlite3가 준 값 그대로다(TEXT는 str, 숫자는 int/float,
+          NULL은 None, BLOB은 bytes). "raw 그대로"가 이 메서드의 존재
+          이유다. 필요하면 호출한 쪽에서 pd.DataFrame(rows, columns=cols)
+          로 감싸거나 직접 형변환한다.
+
+        ★ 성능 주의 ★
+          쿼리를 대신 성형해주거나 인덱스를 골라주지 않는다 — 인덱스가
+          안 걸린 조건으로 조회하면 풀스캔이 그대로 나간다(indicator처럼
+          수천만 행이면 수십 초). 또 fetchall이라 결과가 전부 메모리에
+          올라온다.
+
+        params : "?" 자리표시자에 채울 값들. 값을 SQL 문자열에 직접
+                 끼워 넣지 말고(인젝션·구문깨짐 방지) 이 인자로 분리해서
+                 준다 — load()의 where/params 설명과 같은 이유다.
+
+        반환 : (rows, columns)
+            rows    : sqlite3 커서의 fetchall() 결과 그대로 — 튜플들의 리스트.
+            columns : 컬럼 이름 리스트. 결과셋이 없는 문장(일부 PRAGMA,
+                      값을 안 돌려주는 SQL)이면 커서에 description이 없어서
+                      None이 된다.
+
+        사용 예:
+            rows, cols = store.sql(
+                "SELECT DISTINCT symbol FROM tick "
+                "WHERE dt >= ? AND dt < ? ORDER BY symbol",
+                ["2026-09-03", "2026-09-04"])
+            symbols = [r[0] for r in rows]
+        """
+        with self._connect() as conn:
+            cur = conn.execute(query, params)
+            rows = cur.fetchall()
+            # cur.description : 방금 실행한 쿼리의 컬럼 메타정보들
+            # (이름, 타입 등)이 담긴 튜플. 각 원소의 [0]이 컬럼 이름이다.
+            # SELECT처럼 결과셋이 있는 쿼리에서만 채워지고, 값을 안
+            # 돌려주는 문장에서는 None이라 아래처럼 가드한다.
+            columns = [d[0] for d in cur.description] if cur.description else None
+        return rows, columns
+
     # ── 핵심 ─────────────────────────────────────────────────
     def load(self, table: str, symbol: Symbols = None,
              start=None, end=None, where: Optional[str] = None,

@@ -494,3 +494,93 @@ class FinanceMixin:
         if self._base.keys:
             return pd.DataFrame(cols)
         return pd.DataFrame([cols])
+
+    def to_touch(self, column: str = "close", levels: Sequence[float] = ()) -> pd.DataFrame:
+        """기준선(levels)별 "처음 도달한 시점 + 그때까지 구간 통계"와 경로
+        전체 통계를 한 행으로 요약한다. agg()/summary()처럼 체인을 끝내고
+        DataFrame을 돌려준다("to_" 접두어 = Tdata 반환 안 함).
+
+        column : 값 컬럼. 그룹(또는 전체)의 첫 값이 시작점(진입 시점)으로 쓰인다.
+        levels : 기준선 목록. column과 같은 단위로 준다. 안 주면 경로 전체
+                 통계만 나온다.
+
+        base.keys가 있으면 종목마다 한 행씩, 없으면 한 행짜리 DataFrame
+        (여러 건을 concat 하기 좋게). 한 종목 경로를 v[0]부터 이어진 하나의
+        궤적으로 보기 때문에, keys가 있으면 반드시 종목별로 나눠서 계산해야
+        서로 다른 종목의 값이 한 궤적으로 섞이지 않는다 — agg()/summary()가
+        keys로 그룹지어 계산하는 것과 같은 이유다.
+
+        반환 (기준선 L 마다 4개씩)
+            t{L}      그 선에 처음 닿은 행 번호(그룹 내 0부터). 안 닿았으면 NaN
+            len{L}    시작부터 도달까지의 구간 길이(행 수).
+                      안 닿았으면 경로 전체 길이
+            max{L}    그 구간 안의 최고값
+            min{L}    그 구간 안의 최저값
+                      ★ 안 닿은 선은 경로 전체 기준으로 채운다 ★
+                      "얼마나 근처까지 갔나"를 보라는 뜻이다
+
+        반환 (경로 전체)
+            n         행 수
+            first     시작값
+            last      마지막 값
+            max/min   최고/최저
+            imax/imin 최고/최저에 도달한 행 번호
+            mean/std  평균과 표준편차(ddof=1)
+        """
+        def _one(path: pd.Series) -> Optional[dict]:
+            # NaN이 남아 있으면 비교가 조용히 False가 되어 도달을 놓친다.
+            s = path.astype(float).dropna().reset_index(drop=True)
+            if len(s) < 2:
+                return None
+            v = s.to_numpy()
+            start = v[0]
+            row: dict = {}
+
+            for L in levels:
+                # 방향은 시작값과의 위치로 정한다. 변환하지 않는다.
+                if L >= start:
+                    hits = np.flatnonzero(v >= L)      # 상단선
+                else:
+                    hits = np.flatnonzero(v <= L)      # 하단선
+
+                # hits는 그 선을 넘은 '모든' 행. 첫 번째만 의미가 있다 —
+                # 실제 매매라면 거기서 포지션이 끝나므로 그 뒤는 일어나지 않는다.
+                if len(hits):
+                    i = int(hits[0])
+                    seg = v[:i + 1]            # 시작 ~ 도달까지. 도달 행 포함
+                    row[f"t{L:g}"] = i
+                else:
+                    # 안 닿았으면 경로 전체를 구간으로 본다.
+                    seg = v
+                    row[f"t{L:g}"] = np.nan
+
+                row[f"len{L:g}"] = len(seg)
+                row[f"max{L:g}"] = seg.max()
+                row[f"min{L:g}"] = seg.min()
+
+            # 경로 전체 — 도달 시점만 보면 '왜 안 닿았는지'를 알 수 없다.
+            # 범위를 같이 봐야 기준선이 변동성 대비 너무 넓은지 좁은지 판단이 선다.
+            row["n"] = len(v)
+            row["first"] = start
+            row["last"] = v[-1]
+            row["max"] = v.max()
+            row["min"] = v.min()
+            # imax < imin 이면 위로 먼저 간 것.
+            row["imax"] = int(np.argmax(v))
+            row["imin"] = int(np.argmin(v))
+            row["mean"] = v.mean()
+            row["std"] = v.std(ddof=1)
+            return row
+
+        if self._base.keys:
+            rows = {}
+            for kv, g in self._base.df.groupby(list(self._base.keys), observed=True, sort=False):
+                r = _one(g[column])
+                if r is not None:
+                    rows[kv] = r
+            # orient="index" : 딕셔너리의 키(종목)를 인덱스로, 값(dict)을 한
+            # 행으로 펼친다 — summary()가 종목별 한 행씩 돌려주는 것과 같은 모양.
+            return pd.DataFrame.from_dict(rows, orient="index")
+
+        r = _one(self._base.df[column])
+        return pd.DataFrame() if r is None else pd.DataFrame([r])
