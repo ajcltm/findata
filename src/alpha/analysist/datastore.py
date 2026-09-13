@@ -574,12 +574,45 @@ class DataStore:
 
     def trades(self, symbol: Symbols = None, strategy_id: Optional[str] = None,
                start=None, end=None) -> Tdata:
-        """완결된 거래(trade, 진입~청산 한 쌍) 기록."""
+        """완결된 거래(trade)의 진입/청산을 "그 시각에 그 가격에 일어난
+        사건"으로 편 마커 기록.
+
+        ★ 왜 원본(라운드트립 한 행) 그대로 안 쓰나 ★
+          trade 테이블은 한 행에 entry_dt/entry_price와 exit_dt/exit_price가
+          같이 있다. 근데 Leaf/to_long()은 "이 Leaf의 인덱스 시각에 값
+          컬럼들이 동시에 관측됐다"를 전제한다 — 그 행을 인덱스(entry_dt)
+          그대로 Leaf로 감싸면, exit_price가 실제로는 exit_dt에 일어난
+          일인데 entry_dt 시각에 관측된 것처럼 melt/plot 된다(청산가가
+          진입 시각에 찍히는 그림이 나온다). 그래서 여기서는 entry/exit를
+          각각 "그 사건이 실제로 일어난 시각"의 행으로 나눠 쌓는다.
+
+          라운드트립 단위 그대로(손익/보유기간 등 포함)가 필요하면
+          load("trade")를 쓴다 — 그건 SQL 테이블 모양 그대로라 이 문제가
+          없다(멜트/시간정렬을 안 거치는 순수 표 조회라서).
+
+        symbol/strategy_id 로 거르면 그만큼 keys에서 빠진다(indicators()
+        등과 같은 규칙 — 이미 값이 고정됐으면 나눠 그릴 의미가 없다).
+        side("entry"/"exit")는 필터와 무관하게 항상 key다 — 종목·전략이
+        같아도 entry/exit는 서로 다른 사건이라 구분해야 하고, kind=
+        {"...": "mark"}나 columns=로 진입점/청산점을 따로 그릴 수 있다.
+
+        반환 Tdata: 값 컬럼 "price" 하나, keys=(symbol[, strategy_id], side).
+
+        ★ 알아둘 것 ★
+          아직 청산 안 된(exit_dt가 없는) 트레이드는 진입 행만 나오고
+          청산 행은 안 생긴다. 그리고 start/end는(load()와 마찬가지로)
+          entry_dt 기준으로 거른다 — 그 기간 이전에 진입해 그 기간 안에
+          청산된 트레이드는 진입 행부터 이미 필터에 안 걸려 청산 행도
+          같이 빠진다(원래 trades()도 같은 방식으로 걸렀다)."""
         where, params = _eq_clause("strategy_id", strategy_id)
         df = self.load("trade", symbol=symbol, start=start, end=end,
-                       where=where, params=params)
-        keys = ("symbol",) if strategy_id is not None else ("symbol", "strategy_id")
-        return self._tdata("trade", df, label=strategy_id, keys=keys)
+                       where=where, params=params, index=False)
+        df = _trade_markers(df)
+
+        keys = ["symbol", "side"]
+        if strategy_id is None:
+            keys.insert(1, "strategy_id")
+        return self._tdata("trade", df, label=strategy_id, keys=tuple(keys))
 
     def fills(self, symbol: Symbols = None, start=None, end=None) -> Tdata:
         """체결통보(fill, 주문이 실제로 얼마에 얼마나 체결됐는지) 기록."""
@@ -653,9 +686,12 @@ class DataStore:
         찾아야 그 Trade 가 실제로 어떤 bars/ticks/quotes 를 보고 나온
         것인지 안다.
 
-            trade = store.trades(strategy_id="추세").df.iloc[0]
-            spec = store.spec_for("추세", trade.name)   # trade.name == entry_dt(인덱스)
+            trade = store.load("trade", where="strategy_id=?", params=["추세"]).iloc[0]
+            spec = store.spec_for("추세", trade.name)   # trade.name == entry_dt(load()의 기본 인덱스)
             spec["bars"]   # [["005930", 60]] 처럼 리스트로 이미 풀려 있다
+
+            (trades()는 이제 entry/exit를 나눠 쌓은 마커 모양이라 위
+            용도엔 안 맞는다 — 라운드트립 원본이 필요하면 load()를 쓴다.)
 
         해당 시각 이전에 등록 기록이 없으면 None(오래된 데이터거나,
         strategy 테이블을 이번에 추가하기 전 실행일 수 있다)."""
@@ -705,6 +741,43 @@ def _and_clauses(*pairs: tuple[str, Optional[object]]) -> tuple[Optional[str], l
     if not clauses:
         return None, []
     return " AND ".join(clauses), values
+
+
+def _trade_markers(df: pd.DataFrame) -> pd.DataFrame:
+    """trade 원본(라운드트립 한 행 = entry_dt/entry_price/exit_dt/exit_price)을
+    "그 시각에 그 가격에 일어난 사건" 한 행씩으로 편다. trades()에서만
+    쓰는 내부 전용 헬퍼 — trades() 위 docstring의 "왜 원본 그대로 안
+    쓰나" 설명 참고.
+
+    df는 load("trade", ..., index=False)로 받은, entry_dt/exit_dt가
+    아직 평범한(datetime으로는 파싱된) 컬럼인 상태여야 한다.
+
+    df가 비어 있어도(조건에 맞는 트레이드가 0건) 특별 취급하지 않는다
+    — entry_dt/exit_dt 컬럼은 행이 0개여도 datetime64 타입을 그대로
+    유지하므로, 아래 로직을 그대로 태우면 "비어 있지만 DatetimeIndex는
+    제대로 타입이 잡힌" 빈 DataFrame이 나온다(Leaf.__post_init__이
+    요구하는 조건). 여기서 미리 pd.DataFrame(columns=...)로 지름길을
+    만들면 오히려 평범한 RangeIndex가 나와서 그 조건을 못 지킨다."""
+    # keep : symbol/strategy_id 중 실제로 df에 있는 것만 — trades()가
+    # symbol=... 로 걸러도 그 컬럼 자체는 그대로 남아있지만, 혹시 모를
+    # 스키마 차이에도 안전하게 대응한다.
+    keep = [c for c in ("symbol", "strategy_id") if c in df.columns]
+
+    entries = df[[*keep, "entry_dt", "entry_price"]].rename(
+        columns={"entry_dt": "dt", "entry_price": "price"})
+    entries["side"] = "entry"
+
+    exits = df[[*keep, "exit_dt", "exit_price"]].rename(
+        columns={"exit_dt": "dt", "exit_price": "price"})
+    exits["side"] = "exit"
+    # 아직 청산 안 된(exit_dt가 없는) 트레이드는 청산 행을 만들 수 없다
+    # — dt가 없으면 Leaf가 요구하는 DatetimeIndex에 못 들어간다.
+    exits = exits.dropna(subset=["dt"])
+
+    long = pd.concat([entries, exits], ignore_index=True)
+    # 시간순 정렬 + dt를 인덱스로 — Leaf.__post_init__이 요구하는
+    # "DatetimeIndex" 조건을 여기서 만족시켜 둔다.
+    return long.sort_values("dt").set_index("dt")
 
 
 _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")

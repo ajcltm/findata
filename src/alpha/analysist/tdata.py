@@ -593,13 +593,25 @@ class Tdata(FinanceMixin):
         dedup : "last"(기본)/"first"/"max"/"min" 또는 None(끄기) —
               staged()의 dedup과 같다.
 
-        합칠 leaf(target)의 keys는 base의 keys와 같거나(둘 다 예:
-        ("symbol",) — 이때는 (t, *keys) 기준으로 정확히 맞춰 붙인다)
-        비어 있어야 한다(예: 벤치마크처럼 종목 구분 없는 단일 시계열 —
-        이때는 시간만으로 base의 모든 종목에 똑같이 붙는다). keys가
-        있는데 base와 다르면(예: base는 symbol, target은 label) 한
-        시각에 여러 행이 뒤섞여 잘못 합쳐질 수 있어 여기서 바로 에러를
-        낸다 — where()/tslice() 등으로 종목 하나로 좁힌 뒤 다시 시도한다.
+        합칠 leaf(target)의 keys는 다음 중 하나여야 한다:
+            - 비어 있다               예: 벤치마크처럼 종목 구분 없는
+                                      단일 시계열 — 시간만으로 base의
+                                      모든 종목에 똑같이 붙는다.
+            - base의 keys를 포함한다   예: base=("symbol",), target=
+                                      ("symbol","label") — indicators()를
+                                      label 안 걸러서 가져온 경우가 흔한
+                                      예다. (t, *base.keys) 기준으로 맞춰
+                                      붙이고, target에만 있는 나머지 키
+                                      (label 등)는 결과에 그대로 남아서
+                                      한 종목에 label 개수만큼 행이
+                                      늘어나는 정상적인 1:N 합치기가 된다
+                                      (곱해지는 게 아니라 "이미 있던
+                                      다대일 관계가 그대로 드러나는 것").
+        그 외(예: base는 symbol, target은 label뿐이라 아예 공통 축이
+        없음)는 한 시각에 서로 다른 축의 여러 행이 조합폭발로 뒤섞일 수
+        있어 여기서 바로 에러를 낸다 — where()/tslice() 등으로 종목
+        하나로 좁히거나, target을 가져올 때 label= 등으로 미리 base와
+        같은 단위까지 좁혀서 다시 시도한다.
 
         컬럼 이름이 이미 base에 있으면 "leaf이름.컬럼이름"으로 접두사를
         붙여 구분한다(덮어쓰지 않는다).
@@ -609,11 +621,18 @@ class Tdata(FinanceMixin):
         """
         idx = self._resolve_other_index(sel)
         target = self._others[idx]
-        if target.keys and target.keys != self._base.keys:
+        base_keys, target_keys = set(self._base.keys), set(target.keys)
+        # target이 keys가 없으면(벤치마크류) 항상 허용. keys가 있으면
+        # base의 keys를 전부 포함할 때만 허용(정확히 같은 경우도 포함 —
+        # A<=A는 항상 참이다). base가 keys 없는데 target만 keys가
+        # 있으면(반대 방향) 여전히 막는다 — "그 시각의 base 한 행이
+        # target의 어느 키 값과 짝인지"를 알 방법이 없는 건 똑같다.
+        if target_keys and not (base_keys and base_keys <= target_keys):
             raise ValueError(
-                f"[{target.name}] keys={target.keys} 가 base의 keys={self._base.keys} 와 달라 "
-                "옆으로 합칠 수 없습니다(한 시각에 여러 종목이 뒤섞여 잘못 합쳐질 수 있음). "
-                "먼저 종목 하나로 좁히거나(where()/tslice() 등) keys를 맞춰서 다시 시도하세요."
+                f"[{target.name}] keys={target.keys} 가 base의 keys={self._base.keys} 를 "
+                "포함하지 않아 옆으로 합칠 수 없습니다(한 시각에 서로 다른 축의 여러 행이 "
+                "뒤섞여 잘못 합쳐질 수 있음). 먼저 종목 하나로 좁히거나(where()/tslice() 등) "
+                "target을 base의 keys를 포함하도록 다시 불러와서 시도하세요."
             )
 
         # base와 target 둘만 담은 임시 Tdata — 다른 others는 이 병합과
@@ -632,9 +651,13 @@ class Tdata(FinanceMixin):
                  if c in synced_base.df.columns}
 
         if synced_base.keys and synced_target.keys:
-            # 둘 다 같은 keys(예: symbol)를 가진 다종목 데이터 — 시간
-            # 인덱스만으로 합치면 같은 시각의 다른 종목끼리 잘못 섞일 수
-            # 있으므로, (t, *keys) 전부를 기준으로 정확히 맞춰 합친다.
+            # base.keys 기준으로 맞춰 합친다 — 위 검사를 통과했다는 건
+            # target.keys가 base.keys를 포함한다는 뜻이라(같은 경우도
+            # 포함), (t, *base.keys)는 항상 양쪽에 다 있는 안전한 조인
+            # 키다. target이 label처럼 base에 없는 키를 더 갖고 있으면
+            # (right에는 target.keys 전부가 남아있으므로) 그 키까지
+            # 결과 컬럼에 그대로 남아서, 한 종목에 그 키의 값 개수만큼
+            # 행이 늘어나는 정상적인 1:N 합치기가 된다.
             right = (synced_target.df.reset_index()[[TIME, *synced_target.keys, *value_cols]]
                     .rename(columns=rename))
             merged_df = (synced_base.df.reset_index()

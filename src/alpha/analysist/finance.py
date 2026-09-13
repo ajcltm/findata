@@ -33,13 +33,26 @@
                                지속기간·누적최고가가 다 같이 나온다) — 이
                                런 건 묶어두고, metrics=로 필요한 컬럼만
                                고르게 한다.
-    - agg/summary           : Tdata가 아니라 스칼라(요약값)를 내놓는
-                               "체인이 끝나는" 함수들. agg()가 기본 도구
-                               (스칼라 하나 계산하는 함수를 사용자가 직접
-                               주는 범용 버전)이고, summary()는 자주 쓰는
-                               계산식들을 미리 묶어둔 것 — agg()를 여러
-                               번 부른 결과를 컬럼으로 모아 표 하나로
-                               돌려준다.
+    - agg/return_summary/return_passage/return_ic
+                             : Tdata가 아니라 스칼라·DataFrame을 내놓는
+                               "체인이 끝나는" 함수들 — 이름에 "return_"을
+                               붙여 호출부에서 바로 "이 뒤로는 체인이 안
+                               이어진다"는 걸 알 수 있게 한다. agg만
+                               예외로 접두어가 없다 — "스칼라 하나 계산"
+                               이라는 뜻이 이름 자체에 이미 있고, 다른
+                               return_* 들이 내부적으로 agg()를 불러 쓰는
+                               "기본 도구" 역할이라 굳이 안 붙였다.
+
+                               agg()            스칼라 하나 계산하는 함수를
+                                                사용자가 직접 주는 범용 도구
+                               return_summary() 자주 쓰는 계산식들을 미리
+                                                묶은 것(agg()를 여러 번 불러
+                                                표 하나로)
+                               return_passage() 기준선(levels)별 첫 도달
+                                                시점 + 구간/경로 통계
+                               return_ic()      신호(x)와 미래 수익률(y)의
+                                                수평선(horizon)별 정보계수
+                                                (IC) 커브
 
 ■ 이름 짓는 규칙 — "원본_지표파라미터@컬럼"
     파생 leaf 이름은 반드시 base leaf 이름을 접두어로 포함한다
@@ -92,6 +105,11 @@ def _max_dd_duration(prices: pd.Series) -> int:
     # 그 구간이 시작되고 몇 번째 행인지를 0부터 센다. 최댓값이 곧
     # "가장 오래 걸린 회복"이다.
     return int(grp.groupby(grp).cumcount().max())
+
+
+# return_ic() 의 기본 horizon 목록 — "인덱스 간격의 배수"다. 예를 들어
+# 인덱스 간격이 1초면 이 숫자들이 곧 초 단위(1초 뒤, 2초 뒤, ... 5분 뒤)다.
+_IC_HORIZONS: tuple[int, ...] = (1, 2, 3, 5, 10, 20, 30, 60, 120, 300)
 
 
 class FinanceMixin:
@@ -458,8 +476,8 @@ class FinanceMixin:
             return df.groupby(list(self._base.keys), observed=True, sort=False)[column].apply(fn)
         return fn(df[column])
 
-    def summary(self, column: str = "close", freq: int = 252, threshold: float = 0,
-               specs: Optional[dict] = None) -> pd.DataFrame:
+    def return_summary(self, column: str = "close", freq: int = 252, threshold: float = 0,
+                       specs: Optional[dict] = None) -> pd.DataFrame:
         """자주 쓰는 요약 지표들을 한 표로. specs를 안 주면 기본값(누적
         수익률/연율화수익률/변동성/샤프지수/최대낙폭/최대회복지연/승리
         횟수/승률)을 전부 계산한다. specs={"내이름": fn, ...}로 원하는
@@ -495,20 +513,29 @@ class FinanceMixin:
             return pd.DataFrame(cols)
         return pd.DataFrame([cols])
 
-    def to_touch(self, column: str = "close", levels: Sequence[float] = ()) -> pd.DataFrame:
+    def return_passage(self, y: str = "close", levels: Sequence[float] = ()) -> pd.DataFrame:
         """기준선(levels)별 "처음 도달한 시점 + 그때까지 구간 통계"와 경로
-        전체 통계를 한 행으로 요약한다. agg()/summary()처럼 체인을 끝내고
-        DataFrame을 돌려준다("to_" 접두어 = Tdata 반환 안 함).
+        전체 통계를 한 행으로 요약한다. agg()/return_summary()처럼 체인을
+        끝내고 DataFrame을 돌려준다("return_" 접두어 — 분류 규칙은 파일
+        맨 위 docstring 참고).
 
-        column : 값 컬럼. 그룹(또는 전체)의 첫 값이 시작점(진입 시점)으로 쓰인다.
-        levels : 기준선 목록. column과 같은 단위로 준다. 안 주면 경로 전체
+        ★ 이름의 근거 — "첫 통과 시간(first-passage time)" ★
+          확률과정에서 "어떤 경로가 특정 수준(level)에 처음 도달하는
+          시점"을 가리키는 표준 용어가 "first-passage time"(또는
+          hitting time)이다 — 배리어 옵션 가격결정, 트리플배리어 라벨링
+          등에서 흔히 쓰인다. 여기서 하는 일이 정확히 그것(레벨마다 첫
+          도달 시점 + 그 구간 통계)이라 "passage"를 그대로 썼다.
+
+        y      : 값 컬럼. 그룹(또는 전체)의 첫 값이 시작점(진입 시점)으로
+                 쓰인다.
+        levels : 기준선 목록. y와 같은 단위로 준다. 안 주면 경로 전체
                  통계만 나온다.
 
         base.keys가 있으면 종목마다 한 행씩, 없으면 한 행짜리 DataFrame
         (여러 건을 concat 하기 좋게). 한 종목 경로를 v[0]부터 이어진 하나의
         궤적으로 보기 때문에, keys가 있으면 반드시 종목별로 나눠서 계산해야
-        서로 다른 종목의 값이 한 궤적으로 섞이지 않는다 — agg()/summary()가
-        keys로 그룹지어 계산하는 것과 같은 이유다.
+        서로 다른 종목의 값이 한 궤적으로 섞이지 않는다 — agg()/
+        return_summary()가 keys로 그룹지어 계산하는 것과 같은 이유다.
 
         반환 (기준선 L 마다 4개씩)
             t{L}      그 선에 처음 닿은 행 번호(그룹 내 0부터). 안 닿았으면 NaN
@@ -575,12 +602,99 @@ class FinanceMixin:
         if self._base.keys:
             rows = {}
             for kv, g in self._base.df.groupby(list(self._base.keys), observed=True, sort=False):
-                r = _one(g[column])
+                r = _one(g[y])
                 if r is not None:
                     rows[kv] = r
             # orient="index" : 딕셔너리의 키(종목)를 인덱스로, 값(dict)을 한
-            # 행으로 펼친다 — summary()가 종목별 한 행씩 돌려주는 것과 같은 모양.
+            # 행으로 펼친다 — return_summary()가 종목별 한 행씩 돌려주는 것과 같은 모양.
             return pd.DataFrame.from_dict(rows, orient="index")
 
-        r = _one(self._base.df[column])
+        r = _one(self._base.df[y])
         return pd.DataFrame() if r is None else pd.DataFrame([r])
+
+    def return_ic(self, x: str, y: str, horizons: Sequence[int] = _IC_HORIZONS,
+                  overlap: bool = False) -> pd.DataFrame:
+        """수평선(horizon)별 IC(정보계수, Information Coefficient) 커브 —
+        신호(x)가 몇 칸 뒤 수익률을 얼마나 잘 예측하는지, 어느 horizon에서
+        가장 잘 맞는지를 한 표로 본다. agg()/return_passage()처럼 체인을
+        끝내고 DataFrame을 돌려준다.
+
+        ★ 전제: 시간 간격이 일정하다 ★
+          base.df의 인덱스가 일정 간격(예: 1초)이어야 한다 — horizons의
+          각 h는 "그 간격의 h배 뒤"를 뜻하고 shift(-h)로 구현하기 때문에,
+          간격이 불규칙한 데이터(체결처럼 들쭉날쭉)에 그대로 쓰면 h가
+          실제 시간 폭을 의미하지 않게 된다. 먼저 resample_frame()이나
+          time_frame()으로 일정 간격을 만들고 나서 쓴다.
+
+        x : 신호(지표) 컬럼. 예: OFI_KF의 level.
+        y : 미래 수익률을 계산할 기준 가격 컬럼.
+            ★ 체결가 말고 mid(중간가)를 쓴다 ★
+            체결가는 매수/매도 체결이 번갈아 일어나며 스프레드만큼
+            튀어서(bid-ask bounce) 인위적인 음의 자기상관을 만든다 —
+            IC가 실제보다 왜곡되어 나온다.
+        horizons : "인덱스 간격의 배수" 목록. 1초 간격 데이터면 곧 초 단위
+                  (기본값 _IC_HORIZONS = 1~300초).
+        overlap : False(기본)면 h 간격으로 솎아낸다. h=300일 때 인접
+                 표본은 예측 구간이 299칸 겹쳐서 실질 독립 표본이 훨씬
+                 적은데, p값은 그걸 모르고 유의하다고 말한다. 솎아내면
+                 표본은 줄지만 통계량이 정직해진다.
+
+        base.keys가 있으면(여러 종목) 수익률 계산(shift)과 솎아내기를
+        종목별로 따로 한 뒤(그래야 종목 경계 너머로 미래값이 새거나,
+        한 종목의 구간이 다른 종목 행 때문에 어긋나지 않는다) horizon
+        마다 전 종목을 모아(pooled) 하나의 IC로 계산한다 — 종목이
+        하나뿐이거나 keys가 없으면 이 처리가 원본과 동일하게 동작한다.
+
+        반환 컬럼: h, IC, t, p, n, sigma_bp
+            h        수평선(horizons의 값 그대로)
+            IC       스피어만 순위상관(x vs 그 h 뒤 수익률)
+            t        IC의 t통계량 — |t|>2면 눈여겨볼 만하다(n이 작으면
+                     IC가 커도 무의미하다는 걸 t가 걸러준다)
+            p        t의 양측 p값
+            n        실제로 쓰인 표본 수(overlap=False면 솎아낸 뒤 개수)
+            sigma_bp 그 h 뒤 수익률의 표준편차(bp 단위, 1bp=0.01%)
+        표본이 너무 적거나(n<30) 신호값이 사실상 상수면(unique<5) 그
+        horizon은 결과에서 빠진다(통계가 의미 없어서다).
+        """
+        # scipy는 이 메서드에서만 쓰는 무거운(선택적) 의존성이라, plotter.py
+        # 가 matplotlib/seaborn을 지연 임포트하는 것과 같은 이유로 여기서만
+        # 불러온다 — return_ic()를 한 번도 안 부르면 안 실려도 된다.
+        from scipy.stats import spearmanr
+
+        df = self._base.df
+        out = []
+        for h in horizons:
+            if self._base.keys:
+                # 종목별로 shift/솎아내기를 끝낸 뒤에야 모은다 — 안 그러면
+                # 여러 종목이 시간순으로 뒤섞인 df에서 shift(-h)가 다른
+                # 종목의 미래값을 끌어오고, iloc[::h] 솎아내기도 종목
+                # 경계와 무관하게 잘려서 의미가 없어진다.
+                parts = []
+                for _, g in df.groupby(list(self._base.keys), observed=True, sort=False):
+                    fwd = g[y].shift(-h) / g[y] - 1.0      # h 뒤 수익률
+                    part = pd.DataFrame({"x": g[x], "y": fwd}).dropna()
+                    if not overlap:
+                        part = part.iloc[::h]              # 겹침 제거
+                    parts.append(part)
+                d = pd.concat(parts) if parts else pd.DataFrame(columns=["x", "y"])
+            else:
+                fwd = df[y].shift(-h) / df[y] - 1.0
+                d = pd.DataFrame({"x": df[x], "y": fwd}).dropna()
+                if not overlap:
+                    d = d.iloc[::h]
+
+            if len(d) < 30 or d["x"].nunique() < 5:
+                continue
+
+            ic, p = spearmanr(d["x"], d["y"])
+            n = len(d)
+            out.append({
+                "h": h,
+                "IC": round(ic, 4),
+                # |t| > 2 면 눈여겨볼 만하다. n이 작으면 IC가 커도 무의미.
+                "t": round(ic * np.sqrt(n - 2) / np.sqrt(max(1e-12, 1 - ic ** 2)), 2),
+                "p": round(p, 4),
+                "n": n,
+                "sigma_bp": round(d["y"].std() * 1e4, 2),
+            })
+        return pd.DataFrame(out)
