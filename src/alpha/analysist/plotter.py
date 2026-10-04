@@ -256,21 +256,28 @@ def _candle_count(longs: dict, rows: "Layout", kind: Kind) -> int:
     return best
 
 
-def _bar_width(times: pd.Series) -> float:
-    """datetime x축에 막대를 그릴 때 matplotlib이 이해하는 폭을 추정한다.
+def _bar_width(values: pd.Series) -> float:
+    """연속된 가로축(기본은 시간, x=로 다른 시리즈를 지정했으면 그 값)에
+    막대를 그릴 때 matplotlib이 이해하는 폭을 추정한다.
 
     초보자 참고: matplotlib은 날짜를 내부적으로 "그 날짜가 며칠째인지"를
     나타내는 실수로 다룬다. 그래서 막대 폭도 "며칠 치 너비인지"를 실수로
     줘야 한다(예: 1분봉이면 하루의 1/1440 정도). 데이터가 보통 몇 초/몇
-    분 간격인지 스스로 알아내려고, 실제 시각들 사이의 간격 중 중앙값을
-    쓴다(맨 앞 값 하나만 보면 하필 그 지점이 이상한 값일 수 있어서)."""
-    times = pd.Series(times).sort_values()
-    diffs = times.diff().dropna()
+    분 간격인지 스스로 알아내려고, 실제 값들 사이의 간격 중 중앙값을
+    쓴다(맨 앞 값 하나만 보면 하필 그 지점이 이상한 값일 수 있어서).
+
+    x=로 시간이 아닌 값(예: 지표값)을 가로축으로 쓰면 diff()가 그냥
+    숫자(float)를 돌려준다 — 그땐 Timedelta 나누기를 건너뛰고 그 값을
+    그대로 쓴다."""
+    values = pd.Series(values).sort_values()
+    diffs = values.diff().dropna()
     if diffs.empty:
         return 1.0
     step = diffs.median()
+    if isinstance(step, pd.Timedelta):
+        step = step / pd.Timedelta(days=1)
     # 막대 사이에 살짝 여백이 남도록 실제 간격의 80%만 폭으로 쓴다.
-    return (step / pd.Timedelta(days=1)) * 0.8
+    return step * 0.8
 
 
 _OHLC = ("open", "high", "low", "close")
@@ -329,9 +336,28 @@ def _draw_candle(ax, lg: pd.DataFrame) -> None:
              linewidth=1, zorder=2)
 
 
-def _draw_series(ax, lg, kind: str, cmap) -> None:
+def _merge_x(lg: pd.DataFrame, x_series: "pd.Series | None") -> pd.DataFrame:
+    """plot(x=...)로 다른 시리즈를 가로축으로 지정했을 때, 그 값을 안쪽
+    조인(inner join, 시각 기준)으로 lg에 "_x" 컬럼으로 붙인다.
+
+    inner join을 쓰는 이유: x 쪽에 그 시각 값이 없으면 그 행은 가로축
+    좌표 자체가 없는 셈이라 그릴 수 없다 — 교집합 시각만 남기고, 나머지는
+    조용히 빠진다(이 방식으로 할지는 미리 상의해서 정했다 — 편리하지만
+    일부 데이터가 말없이 빠질 수 있다는 걸 쓰는 쪽이 알고 있어야 한다).
+
+    x_series가 None이면(=x 지정 안 함) lg를 그대로 돌려준다 — 이때는
+    호출하는 쪽이 x 대신 TIME 컬럼을 그대로 쓴다."""
+    if x_series is None:
+        return lg
+    return lg.merge(x_series.rename("_x"), left_on=TIME, right_index=True, how="inner")
+
+
+def _draw_series(ax, lg, kind: str, cmap, x_col: str = TIME) -> None:
     """이미 (t, value, series) 롱 포맷으로 정리된 데이터 한 묶음을 kind에
-    따라 축(ax)에 그린다. "series" 컬럼 값마다 다른 색으로 구분한다."""
+    따라 축(ax)에 그린다. "series" 컬럼 값마다 다른 색으로 구분한다.
+
+    x_col : 가로축으로 쓸 컬럼 이름. 기본은 TIME("t") — plot(x=...)로
+           다른 시리즈를 지정했으면 _merge_x()가 만들어둔 "_x"가 온다."""
     palette = {s: cmap[s] for s in lg["series"].unique()}
 
     if kind == "line":
@@ -345,40 +371,55 @@ def _draw_series(ax, lg, kind: str, cmap) -> None:
         # matplotlib은 반대로 y가 NaN인 지점에서 선을 그냥 끊어 그린다 —
         # 그래서 NaN을 있는 그대로 넘기는 이 방식이라야 dropna=False가
         # 실제로 "끊어서 보여주기"로 이어진다.
+        #
+        # 정렬은 x_col이 아니라 항상 TIME 기준이다 — x=로 시간이 아닌
+        # 값을 가로축으로 써도 "line"은 여전히 "시간순으로 이어진 궤적"을
+        # 보여준다는 뜻을 유지한다(값 기준으로 다시 정렬해 이으면 선이
+        # 뜻하는 바가 조용히 바뀐다 — 산점도처럼 관계만 보고 싶으면
+        # kind="mark"를 쓴다).
         for s in lg["series"].unique():
             sub = lg[lg["series"] == s].sort_values(TIME)
-            ax.plot(sub[TIME], sub["value"], color=cmap[s], label=s, linewidth=1.1)
+            ax.plot(sub[x_col], sub["value"], color=cmap[s], label=s, linewidth=1.1)
     elif kind == "mark":
         # 선으로 안 잇고 점만 찍는다 — 체결가처럼 "그 순간에 그 값이
         # 있었다"만 보여주고 싶을 때, 또는 신호/트리거처럼 띄엄띄엄
-        # 있는 값을 선으로 이으면 오히려 오해를 살 때 쓴다.
+        # 있는 값을 선으로 이으면 오히려 오해를 살 때 쓴다. x=로 다른
+        # 시리즈 값을 가로축으로 쓸 때도(관계/산점도) 보통 이 kind가 더
+        # 자연스럽다.
         sns.scatterplot(
-            data=lg, x=TIME, y="value", hue="series", palette=palette,
+            data=lg, x=x_col, y="value", hue="series", palette=palette,
             ax=ax, legend=True, s=18,
         )
     elif kind == "bar":
         # seaborn의 barplot은 x축을 "범주형"으로 다뤄서 연속된 시간축에는
         # 안 맞는다 — matplotlib의 ax.bar()를 직접, series(hue)별로 한
         # 번씩 나눠 부른다.
-        width = _bar_width(lg[TIME])
+        width = _bar_width(lg[x_col])
         for s in lg["series"].unique():
             sub = lg[lg["series"] == s]
-            ax.bar(sub[TIME], sub["value"], width=width, color=cmap[s],
+            ax.bar(sub[x_col], sub["value"], width=width, color=cmap[s],
                   label=s, alpha=0.7)
     elif kind == "candle":
+        # candle은 항상 시간축 전제다(OHLC는 "그 시간 구간의" 개념이라
+        # x=로 바꿀 수 없다) — plot_tdata()가 x=와 candle을 같이 쓰면
+        # 그리기 전에 미리 에러를 내서, 여기까지는 그 조합이 올 수 없다.
         _draw_candle(ax, lg)
     else:
         raise ValueError(f"모르는 kind: {kind!r} (알려진 것: {', '.join(_KINDS)})")
 
 
-def _draw(ax, longs, names, cmap, kind: Kind):
+def _draw(ax, longs, names, cmap, kind: Kind, x_series: "pd.Series | None" = None):
     """축(ax) 하나에 names에 적힌 시리즈들을 겹쳐 그린다. 각 이름이 어떤
-    형태(line/mark/bar)로 그려질지는 kind가 정한다(_kind_for 참고)."""
+    형태(line/mark/bar)로 그려질지는 kind가 정한다(_kind_for 참고).
+    x_series가 있으면(plot(x=...)) 각 시리즈를 그 값에 안쪽 조인으로
+    맞춰서 가로축으로 쓴다(_merge_x 참고) — 없으면 지금까지처럼 TIME을 쓴다."""
     drawn, labels = False, []
+    x_col = TIME if x_series is None else "_x"
     for n in names:
         lg, lab = resolve(longs, n)
+        lg = _merge_x(lg, x_series)
         labels.append(lab)
-        _draw_series(ax, lg, _kind_for(n, kind), cmap)
+        _draw_series(ax, lg, _kind_for(n, kind), cmap, x_col)
         drawn = True
     if drawn:
         # dict.fromkeys(labels) : 리스트에서 중복을 없애되 순서는 유지하는
@@ -431,6 +472,8 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                sync_num: "int | None" = None,
                by=None, figsize=None, height_ratios=None, palette="tab10",
                show: bool = True, columns: Sequence[str] | None = None,
+               x: "str | None" = None, y: "str | Sequence[str] | None" = None,
+               exclude: "str | Sequence[str] | None" = None,
                dropna: bool = True, kind: Kind = "line",
                theme: "str | None" = "darkgrid", dedup: "str | None" = None):
     """Tdata 를 그린다. (fig, axes) 반환.
@@ -474,6 +517,38 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
            leaf는 여전히 온전하다.)
            어떤 컬럼/시리즈 이름을 쓸 수 있는지 미리 보려면 plot() 전에
            Tdata.series()를 불러본다.
+    x : (선택) 시간 대신 다른 시리즈의 값을 가로축으로 쓴다. 선택자
+           문법은 columns와 같다("name"/"name.column"/"name.column[키]")
+           — 단, columns/y와 달리 리스트가 아니라 **하나만** 받는다(여러
+           개를 가로축으로 동시에 쓰면 "단마다 다른 가로축" 같은 계산이
+           복잡해지고, 지금 구조(여러 단이 TIME 하나를 공유)와도 안
+           맞는다). 지정하면 모든 단(layout의 모든 행)이 그 값을 가로축
+           으로 공유한다 — 지금 TIME이 모든 단에 공유되는 것과 똑같은
+           자리를 대신 차지하는 것뿐, layout의 좌/우 축 배분은 그대로다.
+
+           x로 고른 선택자는 반드시 "시각 하나에 값 하나"여야 한다(여러
+           종목이 섞여 있으면 그 시각에 값이 여럿이라 가로축이 애매해져
+           바로 에러를 낸다) — "name.column[키]"로 하나로 좁혀서 쓴다.
+
+           y 쪽 시리즈와 시간이 정확히 안 맞을 수 있다(서로 다른 leaf에서
+           왔으면 흔하다) — 겹치는 시각만 안쪽 조인(inner join)으로 맞춰
+           그린다. 그 시각에 x 값이 없는 y 데이터는 말없이 빠진다는 뜻이다.
+
+           candle은 OHLC가 "그 시간 구간의" 값이라는 전제라 x=와 같이
+           쓸 수 없다(에러).
+
+               td.plot(x="indicator@OFI_KF.value[005930]", y="tick_relative.relative[005930]", kind="mark")
+    y : columns와 똑같이 동작하되(선택자 문법도 같다) 리스트 대신 문자열
+           하나만 줘도 된다. columns와 y를 동시에 주면 y가 이긴다(y가
+           있으면 그 값을 그대로 columns 자리에 쓴다) — 둘 다 "그릴 것을
+           고른다"는 같은 역할이라, y는 그 자리를 더 짧게 쓰는 이름일
+           뿐이다(x와 짝을 맞춰 이름 지었다).
+    exclude : (선택) 그리지 않을 컬럼/시리즈. 문법은 columns/y와 같고,
+           문자열 하나 또는 리스트를 받는다.
+               y(또는 columns)를 안 줬으면 : "전부 그리되 exclude에 있는 것만 뺀다"
+               y(또는 columns)를 줬으면    : "그 목록 중 exclude에 해당하는 것만 뺀다"
+           즉 exclude는 y/columns가 고른 결과 위에 항상 추가로 적용되는
+           제외 목록이다.
     dropna : True(기본)면 값이 없는(NaN) 지점을 그리기 전에 지운다.
            Tdata.time_frame()으로 일부러 빈 구간을 NaN으로 남겨서 그
            구간을 시각적으로 끊어 보여주고 싶다면 False로 준다 — 지우지
@@ -508,6 +583,14 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
     if theme is not None and theme not in _THEMES:
         raise ValueError(f"모르는 theme: {theme!r} (알려진 것: {', '.join(_THEMES)})")
 
+    # y는 columns의 "하나만 줘도 되는, 짧은 이름"일 뿐이라 여기서 바로
+    # columns 자리로 합쳐버린다 — 아래 로직은 전부 columns만 알면 된다.
+    if y is not None:
+        columns = [y] if isinstance(y, str) else list(y)
+    # exclude도 문자열 하나만 왔으면 리스트로 통일한다(columns/y와 같은 관례).
+    if exclude is not None and isinstance(exclude, str):
+        exclude = [exclude]
+
     # td.staged(by, dedup) : 같은 이름의 Leaf가 여러 장이면 하나로 합치고,
     # dedup이 켜져 있으면 leaf마다 (t,*키) 중복까지 하나씩으로 줄인다.
     leaves: list[Leaf] = list(td.staged(by, dedup))
@@ -522,6 +605,46 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
     for lf in leaves:
         filtered = _apply_columns(full_longs[lf.name], lf.name, columns)
         longs[lf.name] = full_longs[lf.name] if filtered is None else filtered
+
+    if exclude is not None:
+        # columns/y가 고른 결과(longs) 위에서, exclude에 해당하는 것만
+        # 다시 빼낸다 — _apply_columns를 "뺄 것 찾기" 용도로 재사용한다
+        # (문법이 완전히 같으니 선택자 파싱 코드를 새로 안 만들어도 된다).
+        for name in list(longs):
+            removed = _apply_columns(longs[name], name, exclude)
+            if removed is None or removed.empty:
+                continue   # 이 leaf를 겨냥한 exclude 항목이 없거나, 뺄 행이 없음
+            key_cols = [TIME, "col", "series"]
+            # merge(..., indicator=True) : 왼쪽(longs[name])의 각 행이
+            # 오른쪽(removed)에도 있었는지를 "_merge" 컬럼("both"/
+            # "left_only")으로 표시해준다 — "left_only"만 남기면 "뺄
+            # 대상에 없던 행"만 남는, 집합의 차집합(anti-join)이 된다.
+            merged = longs[name].merge(
+                removed[key_cols].drop_duplicates(), on=key_cols,
+                how="left", indicator=True)
+            longs[name] = longs[name][(merged["_merge"] == "left_only").to_numpy()]
+
+    x_series = None
+    x_label = TIME
+    if x is not None:
+        # x는 full_longs(필터 전 전체)에서 찾는다 — y/exclude가 x 자신의
+        # leaf를 건드렸어도(예: 같은 leaf의 다른 컬럼을 exclude) x가 그
+        # 영향을 받으면 안 되므로, y/exclude와는 완전히 독립적으로 고른다.
+        x_lg, x_label = resolve(full_longs, x)
+        if x_lg["series"].nunique() > 1:
+            raise ValueError(
+                f"x='{x}' 가 여러 시리즈({sorted(x_lg['series'].unique())})를 가리켜서 "
+                "가로축 값이 한 시각에 하나로 안 정해집니다. "
+                "\"leaf이름.컬럼이름[키값]\" 형태로 하나로 좁혀서 다시 시도하세요."
+            )
+        if x_lg[TIME].duplicated().any():
+            raise ValueError(
+                f"x='{x}' 가 같은 시각에 값이 여러 개 있어서(한 초에 행이 여러 번 "
+                "있는 데이터) 가로축 값이 하나로 안 정해집니다. "
+                "plot(dedup=\"last\" 등)으로 먼저 하나씩으로 줄인 뒤 다시 시도하세요."
+            )
+        x_series = x_lg.set_index(TIME)["value"]
+
     if layout is not None:
         rows = list(layout)
     else:
@@ -539,6 +662,11 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                 # 그리다 실패하는 대신 시작하기 전에 바로 에러를 내기
                 # 위한 "사전 검증" 단계다.
                 resolve(longs, sel)
+                if x is not None and _kind_for(sel, kind) == "candle":
+                    raise ValueError(
+                        f"'{sel}' 는 kind=\"candle\"인데 x=가 같이 주어졌습니다. "
+                        "캔들(OHLC)은 항상 시간축을 전제해서 x=와 같이 쓸 수 없습니다."
+                    )
 
     cmap = _color_map(longs, palette)
     n_rows = max(len(rows), 1)
@@ -576,21 +704,26 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
         axes = [a[0] for a in axes]
 
         for ax_l, (left, right) in zip(axes, rows):
-            _draw(ax_l, longs, left, cmap, kind)
+            _draw(ax_l, longs, left, cmap, kind, x_series)
             ax_r = None
             if right:
-                # ax.twinx() : 같은 x축(시간)을 공유하면서, y축만 별도로 갖는
-                # "오른쪽 보조 축"을 만든다. 왼쪽/오른쪽 규격(단위)이 다른
-                # 두 시리즈(예: 가격과 거래량)를 한 단에 겹쳐 그릴 때 쓴다.
+                # ax.twinx() : 같은 x축(시간 또는 x=로 지정한 값)을 공유하면서,
+                # y축만 별도로 갖는 "오른쪽 보조 축"을 만든다. 왼쪽/오른쪽
+                # 규격(단위)이 다른 두 시리즈(예: 가격과 거래량)를 한 단에
+                # 겹쳐 그릴 때 쓴다.
                 ax_r = ax_l.twinx()
                 ax_r.grid(False)   # 오른쪽 축의 격자선까지 그리면 겹쳐서 지저분하므로 끈다
-                _draw(ax_r, longs, right, cmap, kind)
+                _draw(ax_r, longs, right, cmap, kind, x_series)
             _merge_legend(ax_l, ax_r)
             ax_l.set_xlabel("")   # 중간 단들은 x축 이름을 비워서, 맨 아래 단에만 한 번 표시한다
 
-        axes[-1].set_xlabel(TIME)   # axes[-1] : 리스트의 "맨 마지막" 원소 — 즉 맨 아래 단
+        axes[-1].set_xlabel(x_label)   # axes[-1] : 리스트의 "맨 마지막" 원소 — 즉 맨 아래 단
 
-        if not dropna:
+        if not dropna and x_series is None:
+            # x=로 가로축을 바꿨으면 이 블록은 건너뛴다 — 아래 로직은
+            # "시간축 전체 범위를 강제로 씌운다"는, TIME 전용 보정이라
+            # 가로축이 값(시리즈)으로 바뀐 경우엔 뜻 자체가 안 맞는다.
+            #
             # dropna=False(주로 time_frame() 직후)일 때만 x축 범위를 직접
             # 못 박는다. 이유: matplotlib은 y가 NaN인 점을 "데이터가
             # 없다"고 보고 축 자동 범위(autoscale) 계산에서 아예 빼버린다

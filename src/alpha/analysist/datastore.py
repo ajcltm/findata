@@ -534,13 +534,19 @@ class DataStore:
                     쪽에서 Tick.raw 자체를 애초에 안 쌓게 해뒀지만(raw는
                     kis_data.db 에 이미 원본이 따로 있다), 그 전에 쌓인
                     과거 행이나 다른 무거운 컬럼이 생기면 여기로 뺄 수
-                    있다."""
+                    있다.
+
+        symbol을 문자열 하나로 줘도 keys에서 symbol을 빼지 않는다 —
+        label/line과 달리, symbol은 여러 종목에서 따로 가져온 뒤 같은
+        이름으로 합쳐질 leaf들을 구분해줄 "최후의 구분자"라서다(한 번
+        빼봤다가 add()가 서로 다른 종목의 데이터를 충돌로 잘못 보는
+        문제가 생겨 되돌렸다 — _eq_clause 윗줄의 설명 참고)."""
         df = self.load("tick", symbol=symbol, start=start, end=end, exclude=exclude)
         return self._tdata("tick", df, keys=("symbol",))
 
     def quotes(self, symbol: Symbols = None, start=None, end=None,
                exclude: Optional[Sequence[str]] = None) -> Tdata:
-        """호가(quote) 데이터. exclude는 ticks() 참고."""
+        """호가(quote) 데이터. exclude/symbol-keys 규칙은 ticks() 참고."""
         df = self.load("quote", symbol=symbol, start=start, end=end, exclude=exclude)
         return self._tdata("quote", df, keys=("symbol",))
 
@@ -548,7 +554,7 @@ class DataStore:
              start=None, end=None) -> Tdata:
         """봉(bar) 데이터. seconds(봉 주기, 예: 60=1분봉)를 주면 그 주기만
         걸러서 SQL 단계에서 가져온다(전부 읽어서 나중에 거르지 않는다 —
-        _eq_clause 설명 참고)."""
+        _eq_clause 설명 참고). symbol-keys 규칙은 ticks() 참고."""
         where, params = _eq_clause("seconds", seconds)
         df = self.load("bar", symbol=symbol, start=start, end=end,
                        where=where, params=params)
@@ -590,9 +596,12 @@ class DataStore:
           load("trade")를 쓴다 — 그건 SQL 테이블 모양 그대로라 이 문제가
           없다(멜트/시간정렬을 안 거치는 순수 표 조회라서).
 
-        symbol/strategy_id 로 거르면 그만큼 keys에서 빠진다(indicators()
-        등과 같은 규칙 — 이미 값이 고정됐으면 나눠 그릴 의미가 없다).
-        side("entry"/"exit")는 필터와 무관하게 항상 key다 — 종목·전략이
+        strategy_id로 거르면 그만큼 keys에서 빠진다(indicators()의 label
+        처리와 같은 규칙 — 이미 값이 고정됐으면 나눠 그릴 의미가 없다).
+        symbol은 문자열 하나로 줘도 keys에서 안 빠진다(ticks() 참고 —
+        label/line과 달리 symbol은 나중에 다른 종목 leaf와 합쳐질 때
+        구분자로 계속 필요하다). side("entry"/"exit")는 필터와 무관하게
+        항상 key다 — 종목·전략이
         같아도 entry/exit는 서로 다른 사건이라 구분해야 하고, kind=
         {"...": "mark"}나 columns=로 진입점/청산점을 따로 그릴 수 있다.
 
@@ -709,6 +718,19 @@ class DataStore:
 # 여기부터는 클래스 밖에 있는 "그냥 함수"들이다. self를 안 받는 걸 보면
 # 알 수 있다 — 특정 DataStore 인스턴스에 속하지 않고 독립적으로 동작하는
 # 계산만 담당한다(그래서 클래스 메서드로 안 두고 모듈 함수로 뺐다).
+#
+# ★ symbol은 label/line/seconds/strategy_id와 달리, 필터로 하나로
+#   좁혀져도 keys에서 빼지 않는다 ★
+#   한 번 시도해봤다가 되돌린 결정이다. label/line은 symbol이라는
+#   "최후의 구분자"가 항상 keys에 남아있는 상태에서 추가로 빼는 것이라
+#   안전했지만, symbol 자체를 빼면 그 구분자가 아예 없어진다. 그러면
+#   서로 다른 종목에서 따로 가져온 뒤 같은 이름으로 합쳐지는 leaf
+#   (예: 두 종목을 각각 relative(replace=True)한 뒤 add()로 합칠 때)를
+#   add()가 "같은 시각에 다른 값"=진짜 충돌로 잘못 판단해버린다 — symbol
+#   값이 달라서 원래 충돌이 아닌데도. 게다가 이 문제(join()에서 symbol이
+#   keys에 남아있어 생기는 문제)는 join() 쪽을 "keys 이름이 아니라 target
+#   이 한 시각에 유일한지"로 고치는 것만으로 이미 해결돼서, symbol을
+#   keys에서 빼는 변경 자체가 필요하지도 않았다(대화 기록 참고).
 def _eq_clause(column: str, value) -> tuple[Optional[str], list]:
     """value 가 None 이면 필터 없음(전체), 아니면 "column = ?" 한 조각.
 

@@ -593,25 +593,28 @@ class Tdata(FinanceMixin):
         dedup : "last"(기본)/"first"/"max"/"min" 또는 None(끄기) —
               staged()의 dedup과 같다.
 
-        합칠 leaf(target)의 keys는 다음 중 하나여야 한다:
-            - 비어 있다               예: 벤치마크처럼 종목 구분 없는
-                                      단일 시계열 — 시간만으로 base의
-                                      모든 종목에 똑같이 붙는다.
-            - base의 keys를 포함한다   예: base=("symbol",), target=
-                                      ("symbol","label") — indicators()를
-                                      label 안 걸러서 가져온 경우가 흔한
-                                      예다. (t, *base.keys) 기준으로 맞춰
-                                      붙이고, target에만 있는 나머지 키
-                                      (label 등)는 결과에 그대로 남아서
-                                      한 종목에 label 개수만큼 행이
-                                      늘어나는 정상적인 1:N 합치기가 된다
-                                      (곱해지는 게 아니라 "이미 있던
-                                      다대일 관계가 그대로 드러나는 것").
-        그 외(예: base는 symbol, target은 label뿐이라 아예 공통 축이
-        없음)는 한 시각에 서로 다른 축의 여러 행이 조합폭발로 뒤섞일 수
-        있어 여기서 바로 에러를 낸다 — where()/tslice() 등으로 종목
-        하나로 좁히거나, target을 가져올 때 label= 등으로 미리 base와
-        같은 단위까지 좁혀서 다시 시도한다.
+        합칠 leaf(target)가 안전한지는 "keys 이름표가 base와 맞는가"가
+        아니라 "target이 한 시각에 행이 하나뿐인가(시간 인덱스가
+        유일한가)"로 판단한다 — 이게 진짜 안전/위험을 가르는 기준이다
+        (keys 이름이 같아도 실제 값이 안 겹치면 위험하지 않고, keys
+        이름이 달라도 target이 한 시각에 하나뿐이면 위험하지 않다 —
+        실제로 keys 이름 기준으로 막았다가, symbol이 keys에 남아있을
+        뿐 실제로는 종목이 하나뿐인 경우를 걸러내지 못해 "같은 keys인데
+        값이 안 겹쳐서 전부 NaN"이 나온 적이 있다).
+
+        target이 한 시각에 하나뿐이면 keys가 뭐든(비어 있든, base와
+        같든 다르든) 시간만으로 안전하게 붙인다 — 짝이 될 행이 애초에
+        하나뿐이라 조합폭발이 원천적으로 불가능하다. target이 한 시각에
+        여러 행이 있으면(예: label 여러 개가 섞인 indicator), 그중
+        어느 게 base의 어느 행과 짝인지 정할 방법이 base와 공유하는
+        keys로만 생기므로, 그때는 base.keys가 target.keys의 부분집합
+        일 때만 (t, *base.keys) 기준으로 맞춰 합친다(target에만 있는
+        나머지 키는 결과에 남아서, 한 종목에 그 키 개수만큼 행이 늘어나는
+        정상적인 1:N 합치기가 된다). 공유하는 keys가 없으면 한 시각에
+        서로 다른 축의 여러 행이 조합폭발로 뒤섞일 수 있어 에러를 낸다 —
+        where()/tslice() 등으로 종목 하나로 좁히거나, target을 가져올
+        때 label= 등으로 미리 한 시각에 하나가 되도록 좁혀서 다시
+        시도한다(또는 dedup=으로 하나씩으로 줄인다).
 
         컬럼 이름이 이미 base에 있으면 "leaf이름.컬럼이름"으로 접두사를
         붙여 구분한다(덮어쓰지 않는다).
@@ -621,52 +624,75 @@ class Tdata(FinanceMixin):
         """
         idx = self._resolve_other_index(sel)
         target = self._others[idx]
-        base_keys, target_keys = set(self._base.keys), set(target.keys)
-        # target이 keys가 없으면(벤치마크류) 항상 허용. keys가 있으면
-        # base의 keys를 전부 포함할 때만 허용(정확히 같은 경우도 포함 —
-        # A<=A는 항상 참이다). base가 keys 없는데 target만 keys가
-        # 있으면(반대 방향) 여전히 막는다 — "그 시각의 base 한 행이
-        # target의 어느 키 값과 짝인지"를 알 방법이 없는 건 똑같다.
-        if target_keys and not (base_keys and base_keys <= target_keys):
-            raise ValueError(
-                f"[{target.name}] keys={target.keys} 가 base의 keys={self._base.keys} 를 "
-                "포함하지 않아 옆으로 합칠 수 없습니다(한 시각에 서로 다른 축의 여러 행이 "
-                "뒤섞여 잘못 합쳐질 수 있음). 먼저 종목 하나로 좁히거나(where()/tslice() 등) "
-                "target을 base의 keys를 포함하도록 다시 불러와서 시도하세요."
-            )
 
-        # base와 target 둘만 담은 임시 Tdata — 다른 others는 이 병합과
-        # 무관하므로 손대지 않는다(staged()/time_sync()는 자기가 가진
-        # 모든 leaf에 적용되는 메서드라, 여기서 격리해두지 않으면 엉뚱한
-        # 다른 leaf까지 같이 재계산된다).
-        pair = Tdata(self._base, (target,), self.resample_rule)
+        # base/target을 각각 독립적으로 dedup한다 — staged()는 안 쓴다.
+        # staged()는 "이름이 같은 leaf들을 하나로 합친다"가 계약인데,
+        # relative(replace=True) 등을 거치면 base/target이 서로 다른
+        # 종목(symbol)이어도 이름이 우연히 같아질 수 있다(둘 다 base의
+        # 원래 table 이름만 반영하고 symbol은 keys로만 구분하기 때문).
+        # 그 상태에서 pair.staged(dedup=...)를 부르면 "이름이 같다"는
+        # 이유로 base와 target을 하나로 합쳐버려서(이름 2개가 1개로
+        # 줄어듦) 바로 아래 "base_leaf, target_leaf = ..." 2개 언패킹이
+        # "not enough values to unpack"으로 터진다 — 실제로 겪은 버그다.
+        # _apply_dedup()을 leaf 하나씩 직접 불러서, 이름이 같든 다르든
+        # 서로 전혀 안 건드리고 각자 자기 (t,*keys) 중복만 줄이게 한다.
         if dedup is not None:
-            base_leaf, target_leaf = pair.staged(dedup=dedup)
-            pair = Tdata(base_leaf, (target_leaf,), self.resample_rule)
+            base_leaf = _apply_dedup(self._base, dedup)
+            target_leaf = _apply_dedup(target, dedup)
+        else:
+            base_leaf, target_leaf = self._base, target
+        # base/target 둘만 담은 임시 Tdata — 다른 others는 이 병합과
+        # 무관하므로 손대지 않는다(time_sync()는 자기가 가진 모든 leaf에
+        # 적용되는 메서드라, 여기서 격리해두지 않으면 엉뚱한 다른 leaf까지
+        # 같이 재계산된다).
+        pair = Tdata(base_leaf, (target_leaf,), self.resample_rule)
         synced_base, synced_target = pair.time_sync(how=how).leaves
+
+        # 여기가 진짜 안전 기준이다 — keys 이름표가 아니라, target이
+        # 지금(dedup/time_sync까지 끝난 뒤) 실제로 한 시각에 행이
+        # 하나뿐인지를 직접 본다.
+        target_unique = synced_target.df.index.is_unique
+        if not target_unique:
+            base_keys, target_keys = set(synced_base.keys), set(synced_target.keys)
+            # target에 한 시각에 여러 행이 있으면, base와 공유하는 keys로
+            # 짝을 지을 수 있을 때만(base.keys가 target.keys의 부분집합)
+            # 안전하다 — 공유하는 keys가 없으면 조합폭발이 "날 수도"가
+            # 아니라 반드시 난다(한 시각의 여러 행 중 base의 어느 행과
+            # 짝인지 정할 근거가 아예 없다).
+            if not (base_keys and base_keys <= target_keys):
+                raise ValueError(
+                    f"[{synced_target.name}] 이 leaf는 한 시각에 행이 여러 개 있는데"
+                    f"(keys={synced_target.keys}), base의 keys={synced_base.keys} 로는 "
+                    "그중 어느 행과 짝지어야 할지 정할 수 없습니다(그대로 합치면 조합폭발이 "
+                    "일어납니다). base의 keys를 포함하도록 target을 다시 불러오거나, "
+                    "where()/dedup= 등으로 target을 한 시각에 하나로 줄여서 다시 시도하세요."
+                )
 
         value_cols = [c for c in synced_target.df.columns if c not in synced_target.keys]
         # 이름이 겹치는 컬럼만 접두사를 붙인다 — 안 겹치면 원래 이름 그대로 둔다.
         rename = {c: f"{synced_target.name}.{c}" for c in value_cols
                  if c in synced_base.df.columns}
 
-        if synced_base.keys and synced_target.keys:
-            # base.keys 기준으로 맞춰 합친다 — 위 검사를 통과했다는 건
-            # target.keys가 base.keys를 포함한다는 뜻이라(같은 경우도
-            # 포함), (t, *base.keys)는 항상 양쪽에 다 있는 안전한 조인
-            # 키다. target이 label처럼 base에 없는 키를 더 갖고 있으면
-            # (right에는 target.keys 전부가 남아있으므로) 그 키까지
-            # 결과 컬럼에 그대로 남아서, 한 종목에 그 키의 값 개수만큼
-            # 행이 늘어나는 정상적인 1:N 합치기가 된다.
+        if target_unique:
+            # target이 한 시각에 하나뿐이면 keys가 뭐든(심지어 base와
+            # 똑같은 이름의 keys라도 값이 안 겹치면) 시간만으로 안전하게
+            # 붙일 수 있다 — 오른쪽(target)에 중복이 없으니 pandas join이
+            # 행을 늘릴 수가 없다. key 컬럼 자체(symbol 등)는 value_cols
+            # 에서 이미 빠져 있어 결과에 안 섞여 들어간다.
+            incoming = synced_target.df[value_cols].rename(columns=rename)
+            merged_df = synced_base.df.join(incoming, how="left")
+        else:
+            # target에 한 시각에 여러 행이 있고, 위 검사를 통과했다는 건
+            # target.keys가 base.keys를 포함한다는 뜻이다. (t, *base.keys)
+            # 는 항상 양쪽에 다 있는 안전한 조인 키다. target이 label처럼
+            # base에 없는 키를 더 갖고 있으면(right에는 target.keys 전부가
+            # 남아있으므로) 그 키까지 결과 컬럼에 그대로 남아서, 한 종목에
+            # 그 키의 값 개수만큼 행이 늘어나는 정상적인 1:N 합치기가 된다.
             right = (synced_target.df.reset_index()[[TIME, *synced_target.keys, *value_cols]]
                     .rename(columns=rename))
             merged_df = (synced_base.df.reset_index()
                         .merge(right, on=[TIME, *synced_base.keys], how="left")
                         .set_index(TIME))
-        else:
-            # target이 keys 없는 단일 시계열(예: 벤치마크) — 시간만으로 붙인다.
-            incoming = synced_target.df[value_cols].rename(columns=rename)
-            merged_df = synced_base.df.join(incoming, how="left")
 
         new_base = synced_base.with_df(merged_df)
         remaining = self._others[:idx] + self._others[idx + 1:]
@@ -987,7 +1013,10 @@ class Tdata(FinanceMixin):
 
     def plot(self, layout=None, sync: str | None = "inner", sync_num: "int | None" = None,
              by=None, figsize=None, height_ratios=None, palette="husl", show: bool = True,
-             columns: Sequence[str] | None = None, dropna: "bool | None" = None,
+             columns: Sequence[str] | None = None,
+             x: "str | None" = None, y: "str | Sequence[str] | None" = None,
+             exclude: "str | Sequence[str] | None" = None,
+             dropna: "bool | None" = None,
              kind="line", theme: "str | None" = "darkgrid", dedup: "str | None" = "last"):
         """seaborn 으로 그린다. 자세한 규칙은 plotter.plot_tdata 참고.
         show=True(기본)면 plt.show() 까지 불러 콘솔에서 바로 창이 뜬다.
@@ -996,6 +1025,15 @@ class Tdata(FinanceMixin):
         (columns=["close"]처럼 컬럼 이름만 주면 그 컬럼을 가진 leaf에만
         적용되고, 없는 leaf는 안 건드린다). 안 주면 지금까지처럼 모든
         leaf의 모든 값 컬럼을 다 그린다.
+        x : 시간 대신 다른 시리즈의 값을 가로축으로 쓴다(선택자 문법은
+        columns와 같되 하나만 받는다). 지정하면 모든 단이 그 값을 가로축
+        으로 공유하고(지금 TIME을 공유하는 자리를 대신), y 쪽과 시각이
+        안 맞으면 겹치는 시각만 안쪽 조인으로 맞춰 그린다. 자세한 규칙과
+        제약(캔들과는 같이 못 씀 등)은 plotter.plot_tdata 참고.
+        y : columns와 완전히 같되 문자열 하나만 줘도 된다(x와 짝 지어
+        부르기 좋게 지은 이름). columns와 같이 주면 y가 이긴다.
+        exclude : 그리지 않을 컬럼/시리즈(문법은 columns/y와 같다). y를
+        안 주면 "전체에서 exclude만 뺀다", y를 주면 "y 중 exclude만 뺀다".
         sync/sync_num : 그리기 전에 time_sync(num=sync_num, how=sync)를
         불러 시간축을 맞춘다. sync는 "어떻게"(inner/ffill, 값이 아예
         없는 자리를 어떻게 할지), sync_num은 "누구를 기준으로"(None=
@@ -1030,8 +1068,8 @@ class Tdata(FinanceMixin):
             dropna = not self._framed
         return plot_tdata(self, layout=layout, sync=sync, sync_num=sync_num, by=by,
                           figsize=figsize, height_ratios=height_ratios, palette=palette,
-                          show=show, columns=columns, dropna=dropna, kind=kind,
-                          theme=theme, dedup=dedup)
+                          show=show, columns=columns, x=x, y=y, exclude=exclude,
+                          dropna=dropna, kind=kind, theme=theme, dedup=dedup)
 
 
 # --------------------------------------------------------------------------
