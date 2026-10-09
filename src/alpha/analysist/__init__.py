@@ -12,9 +12,12 @@
     이 파일에 아래처럼 미리 꺼내두면:
         from alpha.analysist import DataStore              # 훨씬 짧고 편함
 
-■ 이 패키지(analysist 폴더) 안에 있는 파일들
-    datastore.py  SQLite 파일(alpha_data.db/mock_data.db/mock_simul.db)에서
-                  체결·호가·봉·지표·거래 같은 데이터를 읽어오는 DataStore 클래스.
+■ 이 패키지(analysist 폴더) 안에 있는 것들
+    datastore/    데이터 소스 파사드. DataStore(api="local"/"fdr"/...)를
+                  부르면 그 api에 맞는 백엔드(LocalStore=SQLite 기록 파일,
+                  FdrStore=FinanceDataReader, ...)를 만들어 돌려준다.
+                  api 기본값이 "local"이라 DataStore(live=False) 같은
+                  예전 호출은 그대로 동작한다(datastore/__init__.py 참고).
     tdata.py      읽어온 데이터를 담아두고(Leaf) 여러 개를 겹쳐서 다루는(Tdata)
                   그릇 역할을 하는 클래스들.
     plotter.py    Tdata를 그래프로 그려주는 함수. Tdata.plot()을 부르면

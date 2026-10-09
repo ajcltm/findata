@@ -352,6 +352,18 @@ def _merge_x(lg: pd.DataFrame, x_series: "pd.Series | None") -> pd.DataFrame:
     return lg.merge(x_series.rename("_x"), left_on=TIME, right_index=True, how="inner")
 
 
+def _as_values(v) -> list:
+    """plot(lines=...)의 한 자리(왼쪽y/오른쪽y/x) 값을 항상 리스트로
+    통일한다 — 값 하나만 줘도 되고(예: 0.2), 리스트/튜플로 여러 개를
+    줘도 된다(예: (0.2, 0.5) — 한 축에 기준선을 여러 개 긋는다).
+    None이면(그 자리를 안 썼다는 뜻) 빈 리스트 — "그릴 게 없다"가 된다."""
+    if v is None:
+        return []
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return [v]
+
+
 def _draw_series(ax, lg, kind: str, cmap, x_col: str = TIME) -> None:
     """이미 (t, value, series) 롱 포맷으로 정리된 데이터 한 묶음을 kind에
     따라 축(ax)에 그린다. "series" 컬럼 값마다 다른 색으로 구분한다.
@@ -474,6 +486,7 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                show: bool = True, columns: Sequence[str] | None = None,
                x: "str | None" = None, y: "str | Sequence[str] | None" = None,
                exclude: "str | Sequence[str] | None" = None,
+               lines: "Sequence[tuple] | None" = None,
                dropna: bool = True, kind: Kind = "line",
                theme: "str | None" = "darkgrid", dedup: "str | None" = None):
     """Tdata 를 그린다. (fig, axes) 반환.
@@ -549,6 +562,52 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                y(또는 columns)를 줬으면    : "그 목록 중 exclude에 해당하는 것만 뺀다"
            즉 exclude는 y/columns가 고른 결과 위에 항상 추가로 적용되는
            제외 목록이다.
+    lines : (선택) layout의 각 단에 그리는 보조 기준선. layout과 똑같이
+           "행(row) 순서"로 하나씩 대응한다 — i번째 튜플이 i번째 단에
+           적용된다(단 개수보다 적게 줘도 되고, 그 뒤 단은 그냥 안
+           그려진다). 튜플은 (왼쪽축 y값, 오른쪽축 y값, x값) — 뒤에서부터
+           생략할 수 있다.
+
+               lines=[(0.2, 1, "2026-10-08 09:10:00"), (1, 25)]
+                   1단: 왼쪽축 y=0.2 / 오른쪽축 y=1 수평선 + 그 시각에 수직선
+                   2단: 왼쪽축 y=1 / 오른쪽축 y=25 수평선(수직선 없음)
+
+           왼쪽/오른쪽 자리에 None을 주면 그 축은 안 긋는다 — x값만 쓰고
+           싶으면 앞 두 자리를 비운다: (None, None, "2026-10-08 09:10:00").
+           오른쪽축 y값을 줬는데 그 단에 오른쪽 축이 없으면(layout에서
+           그 단의 오른쪽이 비었으면) 조용히 안 그려진다.
+
+           각 자리(왼쪽/오른쪽/x)는 값 하나만 줘도 되고, 리스트/튜플로
+           여러 개를 줘서 한 축에 기준선을 여러 개 그을 수도 있다:
+
+               lines=[(None, None, ("2026-09-15 11:30:00", "2026-09-15 13:30:00"))]
+                   1단에 수직선 두 개(그 두 시각 각각에)
+
+               lines=[((0.2, 0.5), 1)]
+                   1단 왼쪽축에 y=0.2, y=0.5 수평선 두 개 + 오른쪽축에 y=1 하나
+
+           x값(세 번째 자리)은 그 단에만 긋는다 — 다른 단과 공유하지
+           않는다. 여러 단에 같이 긋고 싶으면 그만큼 각 튜플에 반복해서
+           적어준다.
+
+           ★ x값 타입 처리 — 가로축이 시간일 때만 문자열을 날짜로 바꿔준다 ★
+           x=를 안 써서 가로축이 그냥 시간(TIME)이면, x값이 문자열이면
+           pd.to_datetime()으로 날짜/시간으로 바꿔서 쓴다("2026-09-15
+           12:00:00" 같은 흔한 입력이 그대로 된다). 이미 datetime/
+           Timestamp/datetime64인 값은 그대로 쓴다.
+
+           x=로 가로축을 시간 대신 다른 값으로 바꿨으면(x_series가
+           있으면) 이 변환을 안 한다 — 그때는 x값도 그 값의 단위여야
+           하는데(날짜 문자열이 아니라 숫자 등), 가로축이 뭔지 모르는
+           상태에서 함부로 판단하면 위험해서 받은 값을 그대로
+           ax.axvline()에 넘긴다. 안 맞으면 그 결과(엉뚱한 자리에
+           그려지거나 matplotlib 에러)는 사용자 책임이다.
+
+           숫자(int/float)는 가로축이 시간이어도 변환하지 않는다 —
+           pd.to_datetime(숫자)는 그 숫자를 유닉스 타임스탬프로 해석해서,
+           원래 날짜 문자열을 쓰려다 실수로 숫자를 넣은 게 아니라
+           진짜 숫자를 의도한 경우(흔치 않지만) 엉뚱한 날짜로 둔갑할
+           수 있다.
     dropna : True(기본)면 값이 없는(NaN) 지점을 그리기 전에 지운다.
            Tdata.time_frame()으로 일부러 빈 구간을 NaN으로 남겨서 그
            구간을 시각적으로 끊어 보여주고 싶다면 False로 준다 — 지우지
@@ -703,7 +762,7 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
         # 다루기 편한 1차원 리스트로 만든다.
         axes = [a[0] for a in axes]
 
-        for ax_l, (left, right) in zip(axes, rows):
+        for row_i, (ax_l, (left, right)) in enumerate(zip(axes, rows)):
             _draw(ax_l, longs, left, cmap, kind, x_series)
             ax_r = None
             if right:
@@ -714,6 +773,48 @@ def plot_tdata(td: Tdata, layout: Layout | None = None, sync: str | None = None,
                 ax_r = ax_l.twinx()
                 ax_r.grid(False)   # 오른쪽 축의 격자선까지 그리면 겹쳐서 지저분하므로 끈다
                 _draw(ax_r, longs, right, cmap, kind, x_series)
+
+            # lines=[(왼쪽y, 오른쪽y, x값), ...] — row_i번째 단에 그 단의
+            # 튜플을 적용한다(lines가 rows보다 짧아도 되고, 넘치는 뒤쪽은
+            # 그냥 무시한다). axhline/axvline은 "그 값에서 축 전체를
+            # 가로/세로로 가르는 선"을 긋는 matplotlib 함수다.
+            if lines is not None and row_i < len(lines):
+                spec = lines[row_i]
+                left_y = spec[0] if len(spec) > 0 else None
+                right_y = spec[1] if len(spec) > 1 else None
+                x_val = spec[2] if len(spec) > 2 else None
+
+                # 각 자리는 값 하나(예: 0.2)여도 되고, 리스트/튜플(예:
+                # (0.2, 0.5))이어도 된다 — _as_values가 둘 다 "그릴 값들의
+                # 목록"으로 통일해주므로, 몇 개든 같은 방식으로 그린다.
+                for v in _as_values(left_y):
+                    ax_l.axhline(v, color="gray", linestyle="--", linewidth=1, alpha=0.8)
+                for v in _as_values(right_y):
+                    if ax_r is not None:
+                        ax_r.axhline(v, color="gray", linestyle="--", linewidth=1, alpha=0.8)
+                    # ax_r이 없으면(그 단에 오른쪽 축 자체가 없음) 조용히 건너뛴다.
+                for v in _as_values(x_val):
+                    # x=로 가로축을 바꿨다면(x_series is not None) v도 그
+                    # 값의 단위여야 한다 — 그때는 타입을 검사·보정하지
+                    # 않고 받은 그대로 넘긴다(지난 대화에서 정한 방식).
+                    #
+                    # 반면 x=를 안 써서 가로축이 그냥 시간(TIME)이면,
+                    # 가로축이 시간이라는 건 애매할 게 없는 확정된 사실이다
+                    # — 그래서 v가 문자열이면 날짜/시간으로 바꿔준다.
+                    # matplotlib은 datetime/Timestamp/datetime64만 알아보고
+                    # 평범한 문자열은 그대로 못 그려서(ConversionError),
+                    # 안 바꿔주면 "2026-09-15 12:00:00" 같은 흔한 입력이
+                    # 매번 에러로 막힌다.
+                    #
+                    # 숫자(int/float)는 그대로 둔다 — pd.to_datetime(숫자)는
+                    # 그 숫자를 유닉스 타임스탬프로 해석해버려서, x=를
+                    # 깜빡하고 안 쓴 실수일 때 엉뚱한 날짜로 조용히
+                    # 둔갑할 위험이 있다. 이미 datetime/Timestamp인 값도
+                    # 그대로 둔다(이미 되니까).
+                    if x_series is None and isinstance(v, str):
+                        v = pd.to_datetime(v)
+                    ax_l.axvline(v, color="gray", linestyle="--", linewidth=1, alpha=0.8)
+
             _merge_legend(ax_l, ax_r)
             ax_l.set_xlabel("")   # 중간 단들은 x축 이름을 비워서, 맨 아래 단에만 한 번 표시한다
 

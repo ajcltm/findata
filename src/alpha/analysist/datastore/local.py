@@ -1,6 +1,6 @@
 """
 ═══════════════════════════════════════════════════════════════════
- datastore.py — alpha_data.db / mock_data.db / mock_simul.db → Tdata/DataFrame
+ local.py — alpha_data.db / mock_data.db / mock_simul.db → Tdata/DataFrame
 ═══════════════════════════════════════════════════════════════════
 
 ■ 이 파일이 하는 일
@@ -11,6 +11,11 @@
 
     한 문장으로: "SQLite 파일 안의 표(테이블) 하나를 파이썬에서 다루기
     좋은 형태(DataFrame 또는 Tdata)로 꺼내오는 창구"가 이 파일이다.
+
+    DataStore(api="local", ...) 또는 그냥 DataStore(...)(기본값이
+    "local"이라서 생략해도 됨)를 부르면 이 LocalStore가 만들어진다 —
+    바깥에서 이 파일 이름을 직접 알 필요는 없다(패키지 __init__.py의
+    DataStore() 파사드 참고).
 
 ■ 반환 타입 — load() 는 DataFrame, 나머지 전용 메서드는 Tdata
     load(table, ...) 는 table 이 실행 시점에 정해지는 문자열이라 이름/
@@ -36,7 +41,9 @@
     data/mock_simul.db   모의(run_sim), --simul — fake_kis_websocket
                           (장 마감 후·주말 테스트용) + 가짜 주문
     (data/kis_data*.db 는 KiSEngine이 쌓는 원본 시세용 — 이 파일은
-     그쪽을 다루지 않는다. 필요해지면 같은 자리에 별도 로더를 둘 것.)
+     그쪽을 다루지 않는다. KIS REST로 "지금" 받아오는 쪽은 이 패키지의
+     kis.py(KisStore)가 맡는다 — local은 어디까지나 "이미 기록된 것"만
+     읽는다.)
 
 ■ 테이블 = __main__.py의 build_trader()가 add_recording()으로 등록한 것
     tick / quote / bar / notice / fill / trade / indicator
@@ -58,12 +65,6 @@
     걸린다(kis_tocken.get_or_refresh_token()). 로컬 SQLite만 읽는 이
     파일이 그 부작용을 물려받을 이유가 없어서, data 폴더 경로를 직접
     계산한다(값 자체는 kis_config.DATA_DIR 와 같다).
-
-■ 앞으로 확장
-    kis_api REST로 과거 시세 등을 받아오는 소스는 이 옆에 별도 모듈로
-    추가할 예정이다(예: alpha/analysist/kis_source.py). symbol/start/end
-    필터 관례를 이 파일과 맞추면 두 소스를 같은 방식으로 섞어 쓸 수
-    있다.
 """
 
 # 파이썬 초보자를 위한 참고: 아래 import들은 이 파일 어디선가 쓰는
@@ -87,19 +88,20 @@ from typing import Optional, Sequence, Union
 
 import pandas as pd   # 표(테이블) 형태 데이터를 다루는 라이브러리. DataFrame이 핵심 자료형이다.
 
-from .tdata import Tdata
-# ↑ 같은 폴더(analysist) 안의 tdata.py에서 Tdata 클래스를 가져온다.
-#   앞에 점(.)을 붙인 건 "같은 패키지 안의 상대 경로"라는 뜻이다.
+from ..tdata import Tdata
+# ↑ 점 두 개(..)는 "한 단계 더 위 패키지"를 가리킨다. 이 파일은
+#   analysist/datastore/local.py이므로, ..tdata는 analysist/tdata.py다.
+from .base import BaseStore
 
 # 프로젝트 루트/data. kis_config.DATA_DIR 와 같은 값이지만, 위 docstring의
 # 이유로 kis_config 를 import 하지 않고 직접 계산한다.
-#   이 파일: <root>/src/alpha/analysist/datastore.py
-#   parents[3] == <root>  (analysist → alpha → src → <root>)
+#   이 파일: <root>/src/alpha/analysist/datastore/local.py
+#   parents[4] == <root>  (datastore → analysist → alpha → src → <root>)
 #
 # 초보자 참고: __file__ 은 "지금 실행 중인 이 파이썬 파일 자신의 경로"를
 # 담고 있는 특별한 변수다. .resolve() 는 상대경로를 절대경로로 바꿔주고,
 # .parents[n] 은 그 경로에서 n번째 위 폴더를 가리킨다(0이면 바로 위 폴더).
-DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+DATA_DIR = Path(__file__).resolve().parents[4] / "data"
 
 # symbol 인자로 문자열 하나("005930")를 줘도 되고, 여러 개(["005930",
 # "000660"])를 줘도 되고, 아예 안 줘도(None, 전체 종목) 된다는 뜻의
@@ -145,7 +147,7 @@ _BOOL_COLUMNS: dict[str, tuple[str, ...]] = {
 }
 
 
-class DataStore:
+class LocalStore(BaseStore):
     """alpha_data.db(실전) / mock_data.db(모의, 실제 시세) /
     mock_simul.db(모의, fake 피드)에서 테이블을 읽는다.
 
@@ -157,7 +159,7 @@ class DataStore:
         live=False, simul_mode=True      → mock_simul.db    (run_sim --simul)
 
     사용 예:
-        store = DataStore(live=False)               # mock_data.db
+        store = DataStore(live=False)               # mock_data.db (api 기본값이 "local")
         store = DataStore(live=False, simul_mode=True)  # mock_simul.db
         df = store.load("bar", symbol="005930")     # 테이블 하나, 조건 걸어서 → DataFrame
         bars = store.bars("005930", seconds=60)     # → Tdata (bars.df 로 원본도 꺼낼 수 있음)
@@ -166,7 +168,7 @@ class DataStore:
     """
 
     # 클래스 변수 — 인스턴스(store = DataStore(...))를 안 만들어도
-    # DataStore.TABLES 로 바로 접근할 수 있는, 모든 인스턴스가 공유하는 값이다.
+    # LocalStore.TABLES 로 바로 접근할 수 있는, 모든 인스턴스가 공유하는 값이다.
     TABLES = ("tick", "quote", "bar", "notice", "fill", "trade", "indicator", "strategy")
 
     def __init__(self, live: bool = True, simul_mode: bool = False,
@@ -504,22 +506,6 @@ class DataStore:
             return df
         return df.sort_values(idx_col).set_index(idx_col)
 
-    # ── Tdata 포장 ───────────────────────────────────────────
-    def _tdata(self, table: str, df: pd.DataFrame, label=None,
-              keys: tuple[str, ...] = ()) -> Tdata:
-        """table(@label) 을 Tdata 이름으로, keys 중 실제 있는 컬럼만 골라 감싼다.
-
-        label 을 주는 쪽(indicators(label=...), bars(seconds=...) 등)은
-        그 값 하나로 고정됐으므로 keys 에서 뺀다 — 이미 상수라 나눠 그릴
-        의미가 없다. 안 주면(여러 값이 섞여 있을 수 있으면) keys 에 남겨서
-        symbol 처럼 Tdata 가 엔티티별로 나눠 다룰 수 있게 한다."""
-        # f-string(f"...") 안에 {label}처럼 변수를 넣으면 그 값이 문자열
-        # 안에 그대로 끼워진다. 예: table="indicator", label="MACD" 이면
-        # name은 "indicator@MACD" 가 된다.
-        name = f"{table}@{label}" if label is not None else table
-        keys = tuple(k for k in keys if k in df.columns)
-        return Tdata.from_df(name, df, keys=keys)
-
     # ── 자주 쓰는 조합 ────────────────────────────────────────
     # 아래부터는 load()를 매번 인자 다 채워서 부르지 않아도 되게 만든
     # "자주 쓰는 조합"들이다. 전부 내부적으로는 load()를 부르고, 그
@@ -716,7 +702,7 @@ class DataStore:
 
 # ── 유틸 ─────────────────────────────────────────────────────
 # 여기부터는 클래스 밖에 있는 "그냥 함수"들이다. self를 안 받는 걸 보면
-# 알 수 있다 — 특정 DataStore 인스턴스에 속하지 않고 독립적으로 동작하는
+# 알 수 있다 — 특정 LocalStore 인스턴스에 속하지 않고 독립적으로 동작하는
 # 계산만 담당한다(그래서 클래스 메서드로 안 두고 모듈 함수로 뺐다).
 #
 # ★ symbol은 label/line/seconds/strategy_id와 달리, 필터로 하나로

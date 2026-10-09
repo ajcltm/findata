@@ -616,8 +616,11 @@ class Tdata(FinanceMixin):
         때 label= 등으로 미리 한 시각에 하나가 되도록 좁혀서 다시
         시도한다(또는 dedup=으로 하나씩으로 줄인다).
 
-        컬럼 이름이 이미 base에 있으면 "leaf이름.컬럼이름"으로 접두사를
-        붙여 구분한다(덮어쓰지 않는다).
+        컬럼 이름이 이미 base에 있으면 "leaf이름__컬럼이름"으로 접두사를
+        붙여 구분한다(덮어쓰지 않는다). "."이 아니라 "__"를 쓰는 이유 —
+        "."은 plot(columns=/x=/y=)의 선택자 문법이 "leaf.컬럼" 구분자로
+        예약해서 쓰고 있어서, 접두사에 "."을 쓰면 그 컬럼을 나중에 다시
+        선택할 길이 없어진다.
 
             td.join(0)                                  # others[0]을 base에 합침
             td.join("indicator@OFI_KF", how="ffill", dedup="max")
@@ -670,7 +673,18 @@ class Tdata(FinanceMixin):
 
         value_cols = [c for c in synced_target.df.columns if c not in synced_target.keys]
         # 이름이 겹치는 컬럼만 접두사를 붙인다 — 안 겹치면 원래 이름 그대로 둔다.
-        rename = {c: f"{synced_target.name}.{c}" for c in value_cols
+        #
+        # ★ 구분자로 "."을 쓰면 안 된다 ★
+        #   plotter.py의 선택자 문법("leaf이름.컬럼이름[키]")은 "."을
+        #   "leaf 이름과 컬럼 이름을 가르는 구분자"로 예약해서 쓰고,
+        #   rpartition(".")으로 "마지막 마침표에서" 자른다. 접두사에
+        #   "."을 쓰면 그 컬럼 이름 자체에 마침표가 생겨서, 나중에
+        #   plot(columns=/x=/y=)로 이 컬럼을 다시 고르려 할 때 rpartition
+        #   이 엉뚱한 자리에서 잘라 영원히 못 찾게 된다(실제로 겪은 버그 —
+        #   target 이름이 base와 같을 때만이 아니라, 겹치는 컬럼이 있어서
+        #   접두사가 붙는 모든 경우에 해당한다). "__"는 이 문법에서 아무
+        #   의미도 없는 그냥 글자라 안전하다.
+        rename = {c: f"{synced_target.name}__{c}" for c in value_cols
                  if c in synced_base.df.columns}
 
         if target_unique:
@@ -1016,6 +1030,7 @@ class Tdata(FinanceMixin):
              columns: Sequence[str] | None = None,
              x: "str | None" = None, y: "str | Sequence[str] | None" = None,
              exclude: "str | Sequence[str] | None" = None,
+             lines: "Sequence[tuple] | None" = None,
              dropna: "bool | None" = None,
              kind="line", theme: "str | None" = "darkgrid", dedup: "str | None" = "last"):
         """seaborn 으로 그린다. 자세한 규칙은 plotter.plot_tdata 참고.
@@ -1034,6 +1049,14 @@ class Tdata(FinanceMixin):
         부르기 좋게 지은 이름). columns와 같이 주면 y가 이긴다.
         exclude : 그리지 않을 컬럼/시리즈(문법은 columns/y와 같다). y를
         안 주면 "전체에서 exclude만 뺀다", y를 주면 "y 중 exclude만 뺀다".
+        lines : layout의 각 단에 긋는 보조 기준선. (왼쪽축 y값, 오른쪽축
+        y값, x값) 튜플을 단 순서대로 하나씩 대응한다(뒤에서부터 생략
+        가능, None이면 그 축은 안 그음). 각 자리는 값 하나 또는 리스트/
+        튜플(여러 개)을 받는다. x값은 그 단에만 긋고 다른
+        단과 공유하지 않는다. x=를 안 써서 가로축이 시간이면 x값
+        문자열을 날짜로 자동 변환해준다(예: "2026-09-15 12:00:00") —
+        x=로 가로축을 바꿨으면 그 값의 단위를 그대로 써야 한다(변환
+        안 함) — 자세한 규칙은 plotter.plot_tdata 참고.
         sync/sync_num : 그리기 전에 time_sync(num=sync_num, how=sync)를
         불러 시간축을 맞춘다. sync는 "어떻게"(inner/ffill, 값이 아예
         없는 자리를 어떻게 할지), sync_num은 "누구를 기준으로"(None=
@@ -1069,7 +1092,7 @@ class Tdata(FinanceMixin):
         return plot_tdata(self, layout=layout, sync=sync, sync_num=sync_num, by=by,
                           figsize=figsize, height_ratios=height_ratios, palette=palette,
                           show=show, columns=columns, x=x, y=y, exclude=exclude,
-                          dropna=dropna, kind=kind, theme=theme, dedup=dedup)
+                          lines=lines, dropna=dropna, kind=kind, theme=theme, dedup=dedup)
 
 
 # --------------------------------------------------------------------------
