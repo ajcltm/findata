@@ -230,6 +230,13 @@ class TimeSum(Indicator):
         return self._sum
 
 
+# ★★★ 예전 버전 — 더 이상 실전에 등록하지 않는다 ★★★
+# alpha.indicators.kalman.KalmanTrend 로 교체됐다(q 를 fixed 비율로 받고
+# R 만 온라인 추정하던 버전 — 새 버전은 q̂·R̂ 를 둘 다 두 lag·두 반감기로
+# 온라인 추정하고, 중복 스냅샷 처리·추가 진단 라인(surprise/r_surprise/
+# repeat_frac 등)이 있다). MicrostructureWatcher.setup() 은 이제 새 버전을
+# 쓴다(strategy/microstructure_watcher.py 참고). 지우지 않고 대조군·과거
+# 비교용으로 남겨둔다 — 삭제하지 말 것.
 class KalmanTrend(Indicator):
     """2상태 칼만 필터 — 수준(level)과 기울기(slope)를 함께 추정한다.
  
@@ -416,7 +423,7 @@ class KalmanTrend(Indicator):
  
         # 급등락 한 건이 추정치를 통째로 끌고 가지 않게 상한을 둔다
         # (정규분포라면 25배 = 5시그마를 넘는 일은 드물다)
-        sample = min(sample, 25.0 * self._R)
+        sample = min(sample, 1000.0 * self._R)
         k = 1.0 - math.exp(-dt / self._var_tau)
         self._R = max(sample * k + self._R * (1.0 - k), self._R_floor)
  

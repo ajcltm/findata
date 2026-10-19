@@ -12,7 +12,8 @@ microstructure_watcher.py — 호가·체결 미시구조 지표만 계산·기�
 ■ 무엇을 등록하나 (등록 순서 = 계산 순서, indicators.py 규칙)
     flow(BestQuoteFlow)                호가 순유출 — 라인 5개
       ├ ofi_ema  = TimeEMA(flow.ofi_norm)      단일 라인
-      ├ ofi_kf   = KalmanTrend(flow.ofi_norm)  라인 5개(level/slope/...)
+      ├ ofi_kf   = KalmanTrend(flow.ofi_norm)  라인 11개(level/slope/...)
+      │            (alpha.indicators.kalman — q/R 온라인 추정판)
       └ dep      = DepletionRate(flow)         라인 3개(ask/bid/net)
     imb(QueueImbalance)                 호가 잔량 불균형 — 단일 라인
       └ imb_ema  = TimeEMA(imb)                단일 라인
@@ -30,9 +31,10 @@ microstructure_watcher.py — 호가·체결 미시구조 지표만 계산·기�
 
 from __future__ import annotations
 
+from alpha.indicators.kalman import KalmanTrend
 from alpha.indicators.microstructure import (BestQuoteFlow, DepletionRate,
-                                             KalmanTrend, QueueImbalance,
-                                             TimeEMA, TradeFlowImbalance)
+                                             QueueImbalance, TimeEMA,
+                                             TradeFlowImbalance)
 from alpha.trader.trading import Strategy
 
 
@@ -42,7 +44,12 @@ class MicrostructureWatcher(Strategy):
 
     defaults = dict(symbol="005930",
                     ema_halflife=30.0,      # TimeEMA 반감기(초)
-                    kf_q=1e-4,              # KalmanTrend 추세반응 비율
+                    kf_dd_lag=3.0,          # KalmanTrend h(초) — 세 점 거리.
+                                            # 합성데이터 기준값. 녹음에서
+                                            # world_frac 보고 조정할 것
+                                            # (alpha/indicators/kalman.py
+                                            # docstring "h 는 추정 대상이
+                                            # 아니라..." 절 참고)
                     imb_levels=3,           # QueueImbalance 깊이
                     depletion_window=60.0,  # DepletionRate 창(초)
                     tfi_window=30.0)        # TradeFlowImbalance 창(초)
@@ -65,9 +72,13 @@ class MicrostructureWatcher(Strategy):
         self.ofi_ema = self.ind(ofi_ema, on="quote", symbol=sym,
                                 name=f"OFI_EMA({self.p.ema_halflife:g}s)")
 
-        # flow.ofi_norm 을 2상태 칼만으로 — 라인 5개(level/slope/lead/
-        # obs_var/nis), label 고정. 반드시 flow 뒤에 등록.
-        ofi_kf = KalmanTrend(q=self.p.kf_q, source=flow, line="ofi_norm")
+        # flow.ofi_norm 을 2상태 칼만으로 — 라인 11개(level/slope/lead/
+        # obs_var/q_hat/world_frac/nis/nis_raw/surprise/r_surprise/
+        # repeat_frac), label 고정. 반드시 flow 뒤에 등록.
+        # alpha.indicators.kalman.KalmanTrend — q 와 R 을 둘 다 온라인
+        # 추정하는 버전(예전 microstructure.KalmanTrend 를 교체. 그쪽은
+        # 주석으로 legacy 표기만 하고 남겨뒀다).
+        ofi_kf = KalmanTrend(source=flow, line="ofi_norm", dd_lag=self.p.kf_dd_lag)
         self.ofi_kf = self.ind(ofi_kf, on="quote", symbol=sym, name="OFI_KF")
 
         # flow.ask_flow/bid_flow 의 상대 소진 속도 — 라인 3개(ask/bid/net),
