@@ -10,11 +10,15 @@ microstructure_watcher.py — 호가·체결 미시구조 지표만 계산·기�
     뒤섞인다.
 
 ■ 무엇을 등록하나 (등록 순서 = 계산 순서, indicators.py 규칙)
-    flow(BestQuoteFlow)                호가 순유출 — 라인 5개
-      ├ ofi_ema  = TimeEMA(flow.ofi_norm)      단일 라인
-      ├ ofi_kf   = KalmanTrend(flow.ofi_norm)  라인 11개(level/slope/...)
-      │            (alpha.indicators.kalman — q/R 온라인 추정판)
-      └ dep      = DepletionRate(flow)         라인 3개(ask/bid/net)
+    flow(BestQuoteFlow)                 호가 순유출 — 라인 7개(is_dup/
+                                        dup_frac 포함, 중복 스냅샷 판정)
+      ├ ofi_ema  = TimeEMA(flow.ofi_norm)      단일 라인(중복 틱 건너뜀)
+      ├ ofi_kf   = KalmanTrend(flow.ofi_norm)  라인 10개(level/slope/...)
+      │            (alpha.indicators.kalman — q/R 온라인 추정판. flow 의
+      │             is_dup 을 읽어 중복 틱을 건너뛴다)
+      └ dep      = DepletionRate(flow)         라인 3개(ask/bid/net).
+                   내부 TimeSum 도 is_dup 을 읽어 중복 틱에서 유출량을
+                   다시 합산하지 않는다
     imb(QueueImbalance)                 호가 잔량 불균형 — 단일 라인
       └ imb_ema  = TimeEMA(imb)                단일 라인
     tfi(TradeFlowImbalance, on="tick")  체결 방향 불균형 — 단일 라인
@@ -72,12 +76,14 @@ class MicrostructureWatcher(Strategy):
         self.ofi_ema = self.ind(ofi_ema, on="quote", symbol=sym,
                                 name=f"OFI_EMA({self.p.ema_halflife:g}s)")
 
-        # flow.ofi_norm 을 2상태 칼만으로 — 라인 11개(level/slope/lead/
-        # obs_var/q_hat/world_frac/nis/nis_raw/surprise/r_surprise/
-        # repeat_frac), label 고정. 반드시 flow 뒤에 등록.
+        # flow.ofi_norm 을 2상태 칼만으로 — 라인 10개(level/slope/lead/
+        # obs_var/q_hat/world_frac/nis/nis_raw/surprise/r_surprise),
+        # label 고정. 반드시 flow 뒤에 등록.
         # alpha.indicators.kalman.KalmanTrend — q 와 R 을 둘 다 온라인
         # 추정하는 버전(예전 microstructure.KalmanTrend 를 교체. 그쪽은
-        # 주석으로 legacy 표기만 하고 남겨뒀다).
+        # 주석으로 legacy 표기만 하고 남겨뒀다). 중복 스냅샷 판정은 이제
+        # flow 의 is_dup 플래그를 읽는다(dup_line= 계약) — 자체 중복
+        # 감지는 없다.
         ofi_kf = KalmanTrend(source=flow, line="ofi_norm", dd_lag=self.p.kf_dd_lag)
         self.ofi_kf = self.ind(ofi_kf, on="quote", symbol=sym, name="OFI_KF")
 

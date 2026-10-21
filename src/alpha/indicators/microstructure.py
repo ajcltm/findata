@@ -143,11 +143,18 @@ class TimeEMA(Indicator):
     ■ warmup
         개수로 셀 수 없어 None 이다. 대신 첫 값이 들어온 뒤 halflife 의
         3~5배 시간이 지나야 값이 안정된다고 보면 된다.
+
+    ■ ★ 중복 스냅샷 — 상류의 is_dup 플래그를 본다 ★
+        source 가 BestQuoteFlow 처럼 is_dup 라인을 내는 지표면, 중복일
+        때는 건드리지 않고 직전 값을 그대로 낸다(dup_line 파라미터,
+        alpha.indicators.kalman.KalmanTrend 와 같은 계약). source 에
+        그 라인이 없으면(None 반환) 그냥 통과한다 — 중복 판정이 없는
+        지표(QueueImbalance 등)를 소스로 쓸 때는 영향이 없다.
     """
 
     def __init__(self, halflife: float, source: Optional[Indicator] = None,
                  line: str = "value", src: Optional[str] = None,
-                 min_dt: float = 0.1):
+                 min_dt: float = 0.1, dup_line: Optional[str] = "is_dup"):
         if source is None and src is None:
             raise ValueError("source 또는 src 중 하나는 있어야 한다")
         self.halflife = halflife
@@ -155,6 +162,7 @@ class TimeEMA(Indicator):
         self.line_name = line
         self.src = src
         self.min_dt = min_dt
+        self.dup_line = dup_line
         self.tau = halflife / math.log(2.0)
         self._prev_t: Optional[float] = None
 
@@ -163,6 +171,10 @@ class TimeEMA(Indicator):
         return None                              # 시간 기준이라 개수로 못 센다
 
     def update(self, ev):
+        if (self.source is not None and self.dup_line
+                and self.source.line(self.dup_line)):
+            return self.line("value")            # 중복 스냅샷 — 값 유지
+
         x = (self.source.line(self.line_name) if self.source is not None
              else getattr(ev, self.src, None))
         if x is None:
@@ -195,16 +207,27 @@ class TimeSum(Indicator):
         잔량 같은 '상태'에는 쓰면 안 된다 — 그건 마지막 값을 봐야 한다.
         (예전 pandas 코드로 치면 flow 는 resample().sum(),
          depth 는 resample().last() 인 것과 같은 구분이다)
+
+    ■ ★ 중복 스냅샷 — 상류의 is_dup 플래그를 본다 ★
+        유량(flow) 전용이라는 위 설명 때문에 이게 특히 중요하다. 중복
+        스냅샷에서는 BestQuoteFlow 가 ask_flow/bid_flow 를 직전 값
+        그대로 들고 있을 뿐 '새로 유출된 물량'이 아니다. 여기서
+        걸러주지 않으면 같은 유출량이 매 중복 틱마다 또 합산돼 창 합계가
+        중복 횟수만큼 부풀어 오른다(DepletionRate 가 바로 이 클래스를
+        쓴다). dup_line 이 가리키는 라인이 참이면 통째로 건너뛴다 —
+        버퍼도 합계도 커서(cutoff)도 그 틱 기준으로는 움직이지 않는다.
     """
 
     def __init__(self, window: float, source: Optional[Indicator] = None,
-                 line: str = "value", src: Optional[str] = None):
+                 line: str = "value", src: Optional[str] = None,
+                 dup_line: Optional[str] = "is_dup"):
         if source is None and src is None:
             raise ValueError("source 또는 src 중 하나는 있어야 한다")
         self.window = window
         self.source = source
         self.line_name = line
         self.src = src
+        self.dup_line = dup_line
         self.buf: deque = deque()                # (시각, 값)
         self._sum = 0.0
 
@@ -213,6 +236,10 @@ class TimeSum(Indicator):
         return None
 
     def update(self, ev):
+        if (self.source is not None and self.dup_line
+                and self.source.line(self.dup_line)):
+            return self.line("value")            # 중복 스냅샷 — 합계 유지
+
         x = (self.source.line(self.line_name) if self.source is not None
              else getattr(ev, self.src, None))
         if x is None:
@@ -233,10 +260,11 @@ class TimeSum(Indicator):
 # ★★★ 예전 버전 — 더 이상 실전에 등록하지 않는다 ★★★
 # alpha.indicators.kalman.KalmanTrend 로 교체됐다(q 를 fixed 비율로 받고
 # R 만 온라인 추정하던 버전 — 새 버전은 q̂·R̂ 를 둘 다 두 lag·두 반감기로
-# 온라인 추정하고, 중복 스냅샷 처리·추가 진단 라인(surprise/r_surprise/
-# repeat_frac 등)이 있다). MicrostructureWatcher.setup() 은 이제 새 버전을
-# 쓴다(strategy/microstructure_watcher.py 참고). 지우지 않고 대조군·과거
-# 비교용으로 남겨둔다 — 삭제하지 말 것.
+# 온라인 추정하고, 추가 진단 라인(surprise/r_surprise 등)이 있다. 중복
+# 스냅샷 판정도 이 클래스처럼 자체 처리하지 않고, 상류 BestQuoteFlow 의
+# is_dup 플래그를 읽는 방식으로 바뀌었다). MicrostructureWatcher.setup()
+# 은 이제 새 버전을 쓴다(strategy/microstructure_watcher.py 참고).
+# 지우지 않고 대조군·과거 비교용으로 남겨둔다 — 삭제하지 말 것.
 class KalmanTrend(Indicator):
     """2상태 칼만 필터 — 수준(level)과 기울기(slope)를 함께 추정한다.
  
@@ -534,6 +562,9 @@ class BestQuoteFlow(Indicator):
         ofi_norm    ofi 를 직전 최우선호가 잔량 합으로 나눈 값.
                     종목·시간대가 달라도 비교 가능하다. 보통 이걸 쓴다.
         truncated   1 이면 이번 값의 신뢰도가 낮다(아래 참조)
+        is_dup      1 이면 이번 스냅샷이 중복이고 위 값들은 **직전 행의
+                    반복**이다(새 측정이 아니다). 하류와 분석이 이걸 본다
+        dup_frac    중복 스냅샷 누적 비율. ★ 녹음에서 제일 먼저 볼 것 ★
 
     ■ 계산 — 가격이 움직일 때가 핵심이다
         단순히 curr_qty - prev_qty 를 하면 안 된다. 매도1호가가
@@ -561,11 +592,50 @@ class BestQuoteFlow(Indicator):
         잡을 수밖에 없어 값이 과소평가된다. truncated 라인을 1 로 세우니
         분석할 때 이 구간을 걸러낼 것.
 
+    ■ ★ 중복 스냅샷 — 여기서 걸러서 None 을 낸다 ★
+        H0STASP0 은 호가가 안 바뀌어도 주기적으로 온다. 그때
+        '사다리가 하나도 안 변한' 스냅샷이 들어온다.
+
+        걸러야 하는 이유 — 0 과 구별이 안 된다:
+            호가창 그대로        → ofi = 0  "정보가 없다"
+            순유출이 실제로 0    → ofi = 0  "진짜 측정값"
+        안 걸러내면 둘이 같은 숫자로 하류에 흘러간다. 특히 2차 차분을
+        쓰는 추정기에서는 세 점 중 둘이 같아지면 2차 차분이 1차 차분으로
+        퇴화한다 (z₁=z₀ → D = h₁(z₂-z₀), 기울기 소거가 깨짐).
+
+        판정은 **이 클래스가 읽는 필드 전부**를 비교한다:
+            best_ask, best_bid, ask_sizes[0], bid_sizes[0], 두 사다리
+        · 가격만 비교하면 안 된다 — 가격 고정에 잔량만 변하는 게 가장
+          흔하고 그게 주 신호다 (ask1 500→300 이면 ask_flow = 200).
+        · 최우선호가 4개만 비교하면 안 된다 — 깊은 호가가 변했는데
+          건너뛰면 _prev_*_ladder 가 낡아서 다음 계산의 gone 합이 틀린다.
+        · 전부 같으면 갱신할 것도 내보낼 것도 없다. 그래서 안전하다.
+
+        깊은 호가만 바뀐 경우는 중복이 아니다 — 최우선호가 순유출이
+        진짜로 0 이므로 ofi_norm = 0 을 내보내고 사다리는 갱신한다.
+
+        ▶ ★ 중복일 때 값 라인을 건드리지 않는다 ★ update 호출마다
+          자동 레코딩되므로 None 을 넣으면 기록에 None 행이 쌓여
+          이 지표의 시계열 자체가 망가진다. 대신 is_dup = 1 만 세운다.
+          의미상으로도 맞다 — 호가창이 안 변했으니 마지막 측정값이
+          여전히 현재 상태이고, '새 측정이 아니다'라는 표시만 필요하다.
+        ▶ 하류(칼만)는 is_dup 을 읽고 갱신을 건너뛴다. 호출 순서가
+          보장이다 — 같은 quote 이벤트에서 이 지표가 먼저 갱신된다.
+        ▶ 분석할 때는 is_dup == 0 인 행만 쓰면 된다. 무손실이다.
+        ▶ dup_frac 으로 누적 비율을 본다.
+
     ■ 스냅샷의 한계
         H0STASP0 은 이벤트가 아니라 스냅샷이다. 두 스냅샷 사이에
         체결과 취소가 여러 번 있었어도 순변화 하나로만 보인다.
         여기서 나오는 값은 '주문 흐름'이 아니라 '스냅샷 간 순유출'이다.
         원리적 한계이므로 해석할 때 감안할 것.
+
+    ■ ★ 미해결: 분모가 분자와 안 맞는다 ★
+        denom 은 직전 **최우선호가** 잔량 합(ask1+bid1)인데, 분자 ofi 는
+        가격이 밀리면 **여러 호가의 물량을 통째로** 삼킨다(gone 합).
+        그래서 급변 구간에서 ofi_norm 이 1 을 크게 넘을 수 있고, 종목 간
+        스케일이 벌어진다(측정: obs_var 종목 간 597배, 003550 의
+        level ±1.79). 이 클래스의 알려진 문제이고 아직 안 고쳤다.
 
     ■ Tick 으로도 만들 수 있다
         Tick 은 bid/ask/bid_size/ask_size(1호가)를 같이 싣고 온다.
@@ -583,6 +653,9 @@ class BestQuoteFlow(Indicator):
         self._prev_ask_ladder: dict = {}
         self._prev_bid_ladder: dict = {}
         self._prev_top_qty = 0.0                 # 정규화 분모
+        self._prev_key = None                    # 중복 판정용
+        self._n_total = 0
+        self._n_dup = 0
 
     @property
     def warmup(self) -> Optional[int]:
@@ -620,10 +693,32 @@ class BestQuoteFlow(Indicator):
         ask_q = float(quote.ask_sizes[0]) if quote.ask_sizes else 0.0
         bid_q = float(quote.bid_sizes[0]) if quote.bid_sizes else 0.0
 
+        # 사다리를 먼저 만든다 — 중복 판정과 _remember 가 같은 것을 쓴다
+        # (전에는 _remember 안에서 만들었다. 중복 비교에 필요해서 올렸다)
+        ask_ladder = _ladder(quote, "ask")
+        bid_ladder = _ladder(quote, "bid")
+
+        # ── ★ 중복 스냅샷 ★ 이 클래스가 읽는 필드 전부를 비교한다 ──
+        #   가격만 / 최우선호가만 비교하면 안 되는 이유는 클래스 docstring.
+        key = (ask_p, bid_p, ask_q, bid_q,
+               tuple(sorted(ask_ladder.items())),
+               tuple(sorted(bid_ladder.items())))
+        self._n_total += 1
+        if key == self._prev_key:
+            self._n_dup += 1
+            # ★ 값 라인을 건드리지 않는다 ★ 자동 레코딩이므로 None 을
+            #   넣으면 기록이 왜곡된다. 플래그만 세우고 그대로 나간다.
+            self._values["is_dup"] = 1.0
+            self._values["dup_frac"] = self._n_dup / self._n_total
+            return self.line("ofi")
+        self._prev_key = key
+        self._values["is_dup"] = 0.0
+
         if self._prev_ask_p is None:
             # 첫 호가는 비교 대상이 없다. 사다리만 기록하고 넘어간다
             # (CrossOver 의 '첫 계산은 차이만 기록'과 같은 규칙).
-            self._remember(quote, ask_p, bid_p, ask_q, bid_q)
+            self._remember(ask_p, bid_p, ask_q, bid_q, ask_ladder, bid_ladder)
+            self._values["dup_frac"] = self._n_dup / self._n_total
             return None
 
         ask_flow, a_trunc = self._side_flow(
@@ -635,19 +730,20 @@ class BestQuoteFlow(Indicator):
         denom = self._prev_top_qty
         ofi_norm = ofi / denom if denom > 0 else None
 
-        self._remember(quote, ask_p, bid_p, ask_q, bid_q)
+        self._remember(ask_p, bid_p, ask_q, bid_q, ask_ladder, bid_ladder)
 
         self._values["ask_flow"] = ask_flow
         self._values["bid_flow"] = bid_flow
         self._values["ofi"] = ofi
         self._values["ofi_norm"] = ofi_norm
         self._values["truncated"] = 1.0 if (a_trunc or b_trunc) else 0.0
+        self._values["dup_frac"] = self._n_dup / self._n_total
         return ofi
 
-    def _remember(self, quote, ask_p, bid_p, ask_q, bid_q):
+    def _remember(self, ask_p, bid_p, ask_q, bid_q, ask_ladder, bid_ladder):
         self._prev_ask_p, self._prev_bid_p = ask_p, bid_p
-        self._prev_ask_ladder = _ladder(quote, "ask")
-        self._prev_bid_ladder = _ladder(quote, "bid")
+        self._prev_ask_ladder = ask_ladder
+        self._prev_bid_ladder = bid_ladder
         self._prev_top_qty = ask_q + bid_q
 
 

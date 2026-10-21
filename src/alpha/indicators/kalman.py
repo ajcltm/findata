@@ -24,8 +24,8 @@ microstructure.py 의 KalmanTrend 를 교체한다. 라인 이름과 등록 방�
 
   z (ofi_norm)
    │
-   ├─ 중복 스냅샷이면 버린다 ────────────────────────────┐
-   │   (호가 안 바뀌어도 H0STASP0 은 주기적으로 온다)      │ 건너뜀
+   ├─ 상류의 is_dup 플래그가 서 있으면 보류 ─────────────┐
+   │   (BestQuoteFlow 는 값을 그대로 두고 플래그만 세운다) │ 건너뜀
    │                                                      │
    ├─→ 삼중항(lag h)   ─┐                                 │
    └─→ 삼중항(lag 2h)  ─┤  각각 D, W, G 계산              │
@@ -352,35 +352,53 @@ slow 쌍도 그렇다. 각 쌍이 잘 재는 성분만 꺼내 쓰고 나머지�
     버리는 게 맞다. 녹음에서 r_surprise 분포를 보고 판단할 것.
 
 ═══════════════════════════════════════════════════════════════════════
- ■ 중복 스냅샷
+ ■ 중복 스냅샷 — 이 필터의 책임이 아니다
 ═══════════════════════════════════════════════════════════════════════
 
-호가가 안 바뀌어도 H0STASP0 은 주기적으로 오므로 ofi_norm 이 직전 값과
-정확히 같아진다.
+★ 입력 계약 ★
+    중복 판정은 **상류 지표(BestQuoteFlow)의 책임**이다. 상류는
+    중복일 때 값 라인을 그대로 두고 `is_dup = 1` 플래그만 세운다
+    (지표 갱신이 자동 레코딩되므로 None 을 넣으면 상류 자체의
+    시계열이 망가진다). 그래서 이 필터는 **플래그를 읽어서** 판단한다:
 
-★ 근거는 시뮬레이션이 아니라 대수다 ★
+        dup_line 이 가리키는 라인이 참이면 → 즉시 보류
+        (t, _prev_t, 추정기 전부 안 건드림. 건너뛴 시간은 다음 실제
+         틱의 Δt 에 누적된다 — 상태가 떠내려간 만큼 불확실성이
+         커지는 게 맞다)
+
+    호출 순서가 보장이다 — 같은 quote 이벤트에서 BestQuoteFlow 가
+    먼저 갱신되고 그 다음 이 필터가 갱신된다. 순서가 뒤집히면
+    중복뿐 아니라 모든 값이 한 틱 낡으므로, 이건 파이프라인 전체의
+    기존 전제이고 중복 때문에 새로 생긴 위험이 아니다.
+
+    ▶ src= 모드(이벤트 속성 직독)에는 플래그가 없다. 그 경우
+      dup_line 검사는 건너뛴다 — 중복 제거는 호출자 책임이 된다.
+    ▶ 중복 누적 비율은 상류의 dup_frac 라인에서 본다.
+
+★ 왜 걸러야 하는가 — 근거는 시뮬레이션이 아니라 대수다 ★
     세 점 중 둘이 같으면 2차 차분이 **1차 차분으로 퇴화**한다:
         z₁ = z₀  →  D = z₀(c₀+c₁) + c₂z₂ = h₁(z₂ - z₀)
     기울기 소거가 깨져서 그대로 새어 들어온다. 셋 다 같으면 D = 0.
     이건 어떤 데이터에서도 성립하는 항등식이다.
 
-★ 배율 수치는 시뮬레이터에 크게 의존한다 — 참고용으로만 ★
-    "중복" 을 어떻게 모형화하느냐에 따라 숫자가 반대로도 나온다:
-      · z 만 정지, 진짜 x 는 계속 움직임  → 중복 96% 에서 q̂ 2700배
-      · z 와 x 둘 다 정지                → 중복 90% 에서 q̂ 0.024배
-    어느 쪽도 실제 호가 중복과 같지 않다. 실데이터로 봐야 한다.
+    그리고 호가창이 안 바뀐 스냅샷에서 상류가 0 을 내보내면
+    "정보가 없다" 와 "순유출이 실제로 0 이었다" 가 구별되지 않는다.
+    그래서 상류에서 None 으로 가리는 것이 맞다.
 
-★ 신뢰할 수 있는 것은 모드 간 순서다 ★
-    둘 다 정지 모형, 중복 90%, RMSE(센서σ배):
-        skip 0.6350  |  estimator 0.8888  |  none 0.8972
-    skip 이 40% 낫다. 중복 50% 에서는 세 모드가 같았다 (3.49~3.62).
-    estimator 는 추정기만 건너뛰고 필터는 먹이는데, 깨어나는 순간이
-    비싸다 (전 측정: 첫 10초 RMSE 11배, 5초에 회복).
-    ▶ repeat_frac 라인을 재서 고를 것. ≤50% 면 estimator, ≥90% 면 skip.
+★ 전 버전에 있던 repeat_mode 를 제거했다 ★
+    z == last_z 로 중복을 잡던 방식이었는데 두 가지가 틀렸다:
+      · 파생값의 부동소수 완전일치 비교라 깨지기 쉽다
+      · 다른 호가창에서 우연히 같은 값이 나온 것까지 중복으로 오판한다
+    상류에서 '읽는 필드 전부'를 비교하는 것이 정확하다.
 
-(참고: 전 버전에서 중복이 특히 위험했던 이유 중 하나는 D=0 이
- A_slow 사상의 흡수점이 되는 것이었는데, 게이트를 없앤 지금은 그
- 경로가 사라졌다. 그래도 1차 차분 퇴화는 그대로이므로 버린다.)
+★ 남는 것 — 진짜 0 의 연속 ★
+    최우선호가가 안 움직이고 깊은 호가만 바뀌면 ofi_norm = 0 이
+    연속으로 나온다. 중복이 아니라 **진짜 측정값**이므로 상류가
+    통과시키고, 2차 차분은 여전히 퇴화한다.
+    다만 그 경우는 세상이 진짜로 멈춘 것이라 q̂, R̂ 이 작게 측정되고
+    게인이 올라가 관측(=0)을 그대로 받는 것이 맞다. 게이트를 없앤
+    지금은 0 이 A_slow 사상의 흡수점이 되는 경로도 사라졌다.
+    ▶ 조용한 구간 뒤에 필터가 제대로 깨어나는지는 실측할 것.
 
 ═══════════════════════════════════════════════════════════════════════
  ■ q̂ 하한이 필요한 이유 (정리 A)
@@ -399,7 +417,7 @@ P 의 리카티 재귀에는 z 가 한 글자도 없으므로 **P 는 자기가 
 분명하므로 하한을 둔다. 하한은 측정값(R̂, h)에서 만든다 —
 q̂ 자신 기준이면 승법 래칫이 생긴다(옛 25배 클램프 사고).
 
-그리고 이 표가 nis 라인이 필요한 이유다. P 가 구조적으로 자기진단을
+그리고 이 표가 nis 라인이 필요한 이유다. P 가 구조적으로 자기진단를
 못 하므로 nis = v²/S 만이 그걸 보는 창이다.
 
 ★ 게인은 q 의 1/4승이라 q̂ 가 꽤 틀려도 게인은 덜 틀린다 ★
@@ -419,6 +437,17 @@ q̂ 자신 기준이면 승법 래칫이 생긴다(옛 25배 클램프 사고).
     조용한 구간에서 게인이 계속 2배 높다 (평시 RMSE 0.4373, 최악).
     ▶ dd_lag 를 1.0 이하로 내리려면 q_floor_ratio 를 같이 내릴 것.
       기준: ratio ≪ world_frac (출력 라인으로 확인 가능).
+
+★ 하한에 앉았는지 알아보는 법 — 두 라인을 같이 본다 ★
+    world_frac ≲ q_floor_ratio  이면 하한이 진짜 q 보다 크다는 뜻이고,
+    그러면 q̂ 가 하한에 앉아 Q 가 과대평가된다. 결과로
+        Q 과대 → P 과대 → S = P₀₀ + R̂ 과대 → nis = v²/S < 1
+    이 된다. 즉 **world_frac 이 0 에 가깝고 nis 가 1 보다 뚜렷히 작으면
+    하한 때문**이다 (합성 호가창 실측: world_frac 0.000~0.004 에서
+    q̂/하한 = 1.00, nis 0.67~0.70).
+    ▶ 그때는 q_floor_ratio 를 world_frac 보다 훨씬 작게 내린다.
+      단, world_frac 이 모든 h 에서 0 이면 하한 문제가 아니라
+      **2상태 모델 자체가 안 맞는 것**이다 (아래 '검증되지 않은 것').
 
 ═══════════════════════════════════════════════════════════════════════
  ■ ★ 아직 실데이터로 검증되지 않은 것 ★
@@ -450,7 +479,7 @@ q̂ 자신 기준이면 승법 래칫이 생긴다(옛 25배 클램프 사고).
       대조할 것 (1:매수, 5:매도 인지).
 
 녹음 하루로 할 검증 순서:
-    1  repeat_frac       ≤50% → estimator,  ≥90% → skip
+    1  dup_frac (상류)    중복 비율. 걸러지고 있는지 확인
     2  평균 틱간격        h ≥ 간격×6 확보
     3  world_frac        0.5 에서 멀면 dd_lag 조정 (위 반복 절차)
     4  A_h vs h³ 직선성   ★ 가장 중요. 2상태 모델 전체의 근거 ★
@@ -474,7 +503,6 @@ q̂ 자신 기준이면 승법 래칫이 생긴다(옛 25배 클램프 사고).
     surprise    v²/V̂ — 예측 실패 크기. 전략 신호용
     r_surprise  s/A_slow — 진단 전용. 게이트로 쓰지 않는다.
                 평시 ~χ²₁ 이어야 한다. 꼬리가 두꺼우면 깨진 틱이 있다
-    repeat_frac 중복 스냅샷 비율 p₀.  ★ 녹음에서 제일 먼저 볼 것 ★
 
 등록:
     self.kf = self.ind(KalmanTrend(source=self.flow, line="ofi_norm",
@@ -668,11 +696,6 @@ class KalmanTrend(Indicator):
 
     ──────────────── 근거가 있는 안전장치 ────────────────
 
-        repeat_mode   중복 스냅샷 처리. 실측으로 필요성 확인:
-                        none      → 중복 96% 에서 q̂ 2700배, nis 1965
-                        estimator → 추정 정상, 깨어나는 첫 10초 RMSE 11배
-                        skip      → 전 구간 정상
-                      ▶ repeat_frac 을 재서 고를 것
         q_floor_ratio 1e-2.  Q=0 이면 P→0, 게인→0 으로 필터 동결.
                       하한 = ratio·9R̂/h³ = "f 가 최소 ratio 는 되게".
                       ★ ratio ≪ world_frac 이어야 한다 ★ dd_lag 를
@@ -681,6 +704,12 @@ class KalmanTrend(Indicator):
                       ★ 측정값에서 만든다 — q̂ 자신 기준이면 래칫 ★
         r_floor_ratio 1e-3.  하한 = A_h^slow·ratio.
                       이론상 R ≤ A_h 이므로 측정값 기준 하한이다.
+        dup_line      "is_dup".  상류에서 중복 스냅샷을 표시하는 라인 이름.
+                      이 라인이 참인 틱은 통째로 건너뛴다.
+                      ★ 상류가 중복을 표시하지 않으면 2차 차분이 1차
+                        차분으로 퇴화한다 (모듈 docstring 참조) ★
+                      None 으로 두면 검사하지 않는다. source 가 없는
+                      src= 모드에서는 자동으로 검사하지 않는다.
         min_n         30.  창키우기가 이만큼 표본을 모을 때까지 대기.
 
     ──────────── ★ 제가 임의로 정한 값 ★ ────────────
@@ -706,10 +735,10 @@ class KalmanTrend(Indicator):
                  q_fixed: Optional[float] = None,
                  obs_var: Optional[float] = None,
                  # ── 근거 있는 안전장치 ──
-                 repeat_mode: str = "skip",
                  q_floor_ratio: float = 1e-2,
                  r_floor_ratio: float = 1e-3,
                  min_n: int = 30,
+                 dup_line: Optional[str] = "is_dup",
                  # ── 임의로 정한 값 ──
                  lag_tol_lo: float = 0.5,
                  lag_tol_hi: float = 2.0,
@@ -717,8 +746,6 @@ class KalmanTrend(Indicator):
                  min_dt: float = 1e-4):
         if source is None and src is None:
             raise ValueError("source 또는 src 중 하나는 있어야 한다")
-        if repeat_mode not in ("skip", "estimator", "none"):
-            raise ValueError("repeat_mode 는 skip/estimator/none")
 
         self.source = source
         self.line_name = line
@@ -732,10 +759,10 @@ class KalmanTrend(Indicator):
         self.q_fixed = q_fixed
         self.fixed_obs_var = obs_var
 
-        self.repeat_mode = repeat_mode
         self.q_floor_ratio = q_floor_ratio
         self.r_floor_ratio = r_floor_ratio
         self.min_n = min_n
+        self.dup_line = dup_line
 
         self.lag_tol_lo = lag_tol_lo
         self.lag_tol_hi = lag_tol_hi
@@ -758,11 +785,6 @@ class KalmanTrend(Indicator):
         self._q: Optional[float] = None
         self._R: Optional[float] = obs_var
         self._world_frac: Optional[float] = None
-
-        # ── 중복 스냅샷 ──
-        self._last_z: Optional[float] = None
-        self._n_repeat = 0
-        self._n_total = 0
 
         # ── 필터 상태 ──
         self._level: Optional[float] = None
@@ -845,38 +867,27 @@ class KalmanTrend(Indicator):
     # ② 필터
     # ───────────────────────────────────────────────────────────
     def update(self, ev):
+        # ★ 중복 스냅샷 ★ 상류가 세운 플래그를 읽는다.
+        #   상류는 값 라인을 그대로 두므로(자동 레코딩 보존) 중복 여부는
+        #   이 플래그로만 알 수 있다. 값을 비교하면 안 된다 — 다른
+        #   호가창에서 우연히 같은 값이 나온 것까지 중복으로 오판한다.
+        #   t, _prev_t, 추정기 전부 안 건드리므로 건너뛴 시간이 다음
+        #   실제 틱의 Δt 에 누적된다.
+        if (self.source is not None and self.dup_line
+                and self.source.line(self.dup_line)):
+            return self.line("level")
+
         z = (self.source.line(self.line_name) if self.source is not None
              else getattr(ev, self.src, None))
         if z is None:
             return self.line("level")               # 입력이 아직 없다
         z = float(z)
 
-        # ★ 중복 스냅샷 ★
-        #   호가가 안 바뀌어도 H0STASP0 은 주기적으로 온다. 그러면
-        #   ofi_norm 이 직전 값과 정확히 같다. 이 틱을 쓰면 세 점 중
-        #   둘이 같아져 2차 차분이 1차 차분으로 퇴화한다
-        #   (z₁=z₀ → D = h₁(z₂-z₀)).
-        #   실측 (제외하지 않았을 때): 중복 50% → q̂ 13.4배,
-        #   중복 96% → q̂ 2700배, nis 1965.
-        #   시각(_prev_t)도 갱신하지 않으므로 다음 실제 틱의 Δt 에
-        #   건너뛴 시간이 누적된다 — 그동안 상태가 떠내려간 만큼
-        #   불확실성이 커지는 게 맞다.
-        self._n_total += 1
-        is_repeat = self._last_z is not None and z == self._last_z
-        if is_repeat:
-            self._n_repeat += 1
-            if self.repeat_mode == "skip":
-                self._values["repeat_frac"] = self._n_repeat / self._n_total
-                return self.line("level")
-        self._last_z = z
-
         t = _event_time(ev)
         dt = (self.min_dt if self._prev_t is None
               else max(t - self._prev_t, self.min_dt))
 
-        # repeat_mode="estimator" 는 추정기만 건너뛰고 필터는 먹인다
-        if not (is_repeat and self.repeat_mode == "estimator"):
-            self._estimate(t, z)
+        self._estimate(t, z)
         self._prev_t = t
 
         if not self._ready():
@@ -972,9 +983,6 @@ class KalmanTrend(Indicator):
         # 진단 전용. 게이트로 쓰지 않는다 — 평시 ~χ²₁ 이어야 하고,
         # 꼬리가 두꺼우면 ofi_norm 계산이 깨지는 틱이 있다는 뜻이다.
         self._values["r_surprise"] = self._L1.last_surprise
-        # 중복 스냅샷 비율 p₀. ★ 녹음에서 반드시 확인할 것 ★
-        self._values["repeat_frac"] = (self._n_repeat / self._n_total
-                                       if self._n_total else None)
 
     def _blank(self):
         for name in ("level", "slope", "lead", "nis", "nis_raw", "surprise"):
@@ -983,5 +991,3 @@ class KalmanTrend(Indicator):
         self._values["q_hat"] = self._q
         self._values["world_frac"] = self._world_frac
         self._values["r_surprise"] = self._L1.last_surprise
-        self._values["repeat_frac"] = (self._n_repeat / self._n_total
-                                       if self._n_total else None)
