@@ -835,7 +835,7 @@ class KalmanTrend(Indicator):
         #   필터이므로 그게 맞는 R 이다 (모듈 docstring 참조).
         if self.fixed_obs_var is None:
             Ah, A2h = self._L1.A_slow, self._L2.A_slow
-            R_raw = (8.0 * Ah - A2h) / 7.0
+            R_raw = (8.0 * Ah  - A2h) / 7.0
             # 하한은 측정값 A_h 기준 (이론상 R ≤ A_h).
             # R̂ 자신 기준이면 승법 래칫이 생긴다.
             self._R = max(R_raw, Ah * self.r_floor_ratio)

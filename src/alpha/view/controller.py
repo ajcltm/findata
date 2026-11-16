@@ -38,7 +38,7 @@ import shlex
 
 from alpha.view import model, view
 from alpha.strategy.manual import MANUAL_STRATEGY_ID
-from alpha.trader.trading import OrderStatus
+from alpha.core.orders import OrderStatus
 
 # 전역 키 짧은 설명. app.py 의 Router.GLOBAL_KEYS 와 짝이 맞아야 한다.
 GLOBAL_KEY_HINTS = {

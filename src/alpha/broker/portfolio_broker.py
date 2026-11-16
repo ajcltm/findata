@@ -42,8 +42,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-from alpha.trader.trading import (EPS, Broker, Fill, Order, OrderStatus, Position, Side,
-                     TradeTracker)
+from alpha.broker.base import Broker
+from alpha.core.orders import EPS, Fill, Order, OrderStatus, Position, Side
+from alpha.core.trades import TradeTracker
 
 log = logging.getLogger(__name__)
 

@@ -34,8 +34,10 @@ from alpha.events import events
 from alpha.recording.recorder import Recorder
 from alpha.recording.sinks import SqliteSink
 from alpha.strategy.manual import ManualStrategy, MANUAL_STRATEGY_ID
-from alpha.trader.trading import (AccountSnapshot, Fill, IndicatorSnapshot, Order,
-                                   Position, Strategy, StrategySpec, Trade)
+from alpha.core.orders import Fill, Order, Position
+from alpha.core.trades import Trade
+from alpha.recording.records import AccountSnapshot, IndicatorSnapshot, StrategySpec
+from alpha.strategy.base import Strategy
 from alpha.view.app import Application
 from alpha.view.model import Aggregator, Board, Latest, Pivot, Recent
 
@@ -488,7 +490,7 @@ class AlphaTrader:
                 len(self._specs), symbol, seconds)
         # 백테스트엔 live/mock 구분이 없다 — alpha_data.db 고정.
         self._ensure_default_recording_and_views(db_name="alpha_data.db")
-        from alpha.broker.bt_broker import run_backtest as _run_backtest
+        from alpha.engine.backtest import run_backtest as _run_backtest
         try:
             return _run_backtest(
                 self._build_engine, data, symbol=symbol, seconds=seconds,

@@ -14,7 +14,7 @@ indicator_watcher.py — 지표만 계산·기록하는 관찰용 전략. 주문
 from __future__ import annotations
 
 from alpha.indicators.indicators import ATR, MACD, SMA, CrossOver
-from alpha.trader.trading import Strategy
+from alpha.strategy.base import Strategy
 
 
 class IndicatorWatcher(Strategy):

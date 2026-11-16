@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from alpha.trader.trading import Strategy
+from alpha.strategy.base import Strategy
 
 log = logging.getLogger("main")
 

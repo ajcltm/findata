@@ -15,7 +15,7 @@ manual.py — 콘솔 수동 주문 전용 전략. 지표도 훅도 없다.
 
 from __future__ import annotations
 
-from alpha.trader.trading import Strategy
+from alpha.strategy.base import Strategy
 
 # 이 전략의 strategy_id. alphatrader.py(등록)와 view/controller.py(주문
 # 화면이 engine.slots[...] 를 찾을 때) 양쪽이 이 상수를 그대로 참조한다.

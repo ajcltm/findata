@@ -68,7 +68,7 @@ from alpha.strategy.indicator_watcher import IndicatorWatcher
 from alpha.strategy.microstructure_watcher import MicrostructureWatcher
 from alpha.strategy.sma_cross_atr import SmaCrossATR
 from alpha.strategy.spread_watcher import SpreadWatcher
-from alpha.trader.trading import IndicatorSnapshot
+from alpha.recording.records import IndicatorSnapshot
 from alpha.view import model
 
 log = logging.getLogger("main")

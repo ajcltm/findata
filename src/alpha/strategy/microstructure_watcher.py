@@ -39,7 +39,7 @@ from alpha.indicators.kalman import KalmanTrend
 from alpha.indicators.microstructure import (BestQuoteFlow, DepletionRate,
                                              QueueImbalance, TimeEMA,
                                              TradeFlowImbalance)
-from alpha.trader.trading import Strategy
+from alpha.strategy.base import Strategy
 
 
 class MicrostructureWatcher(Strategy):

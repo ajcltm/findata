@@ -18,7 +18,7 @@ dobi_watcher.py — DOBI(1호가 잔량 기반 Order Book Imbalance)만 계산·
 from __future__ import annotations
 
 from alpha.indicators.indicators import DOBI
-from alpha.trader.trading import Strategy
+from alpha.strategy.base import Strategy
 
 
 class DobiWatcher(Strategy):

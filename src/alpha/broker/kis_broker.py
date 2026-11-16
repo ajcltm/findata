@@ -29,31 +29,15 @@ import logging
 import threading
 from datetime import datetime, timedelta
 
-# 공통 계층에서 가져온다. 이 파일은 trading.py 에만 의존한다.
-from alpha.trader.trading import (Broker, Fill, Order, OrderStatus, OrderType,
-                     Position, Side, Strategy, Trader)
+# 공통 계층에서 가져온다. (옛 trading.py 를 core/broker/strategy/trader 로 나눴다)
+# round_to_tick 은 broker/base.py 하나로 합쳤다.
+from alpha.broker.base import Broker, round_to_tick
+from alpha.core.orders import Fill, Order, OrderStatus, OrderType, Position, Side
+from alpha.strategy.base import Strategy
+from alpha.trader.trader import Trader
 from kis import kis_api
 
 log = logging.getLogger(__name__)
-
-
-def round_to_tick(price: float) -> float:
-    """한국 주식 호가단위로 가격을 반올림한다.
-
-    거래소는 아무 가격이나 받지 않는다. 예를 들어 3만원대 종목은 50원 단위로만
-    주문할 수 있어서 30,123원 같은 지정가는 거부된다.
-
-    주의: 이 함수는 백테스트(bt_broker.py)에도 똑같이 들어가 있다.
-          백테스트만 자유로운 가격으로 체결시키면 실전보다 성과가 좋게 나온다.
-    """
-    p = float(price)
-    # (가격 상한, 그 구간의 호가단위) 쌍을 낮은 가격부터 훑는다.
-    for limit, tick in ((2000, 1), (5000, 5), (20000, 10),
-                        (50000, 50), (200000, 100), (500000, 500)):
-        if p < limit:
-            # tick 으로 나눠 반올림한 뒤 다시 곱하면 tick 배수가 된다.
-            return round(p / tick) * tick
-    return round(p / 1000) * 1000        # 50만원 이상은 1,000원 단위
 
 
 # ══════════════════════════════════════════════════════════════════

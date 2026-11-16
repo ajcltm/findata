@@ -44,7 +44,7 @@ from kis.kis_websocket import SENTINEL
 from alpha.engine.engine import Engine
 from alpha.trader.killswitch import KillSwitch
 from alpha.events.events import MarketEvent, Notice
-from alpha.trader.trading import Fill, Order
+from alpha.core.orders import Fill, Order
 
 log = logging.getLogger("alpha.live_runner")
 

@@ -56,21 +56,10 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from alpha.events.events import MarketEvent, Notice
-from alpha.trader.trading import (EPS, Broker, Fill, Order, OrderStatus, OrderType,
-                     Position, Side)
+from alpha.broker.base import Broker, round_to_tick
+from alpha.core.orders import EPS, Fill, Order, OrderStatus, OrderType, Position, Side
 
 log = logging.getLogger("sim")
-
-
-def round_to_tick(price: float) -> float:
-    """한국 주식 호가단위. ★ 실전(kis_broker)과 같은 함수여야 한다 ★
-    모의만 자유로운 가격에 체결시키면 성과가 좋게 나온다."""
-    p = float(price)
-    for limit, tick in ((2000, 1), (5000, 5), (20000, 10),
-                        (50000, 50), (200000, 100), (500000, 500)):
-        if p < limit:
-            return round(p / tick) * tick
-    return round(p / 1000) * 1000
 
 
 class SimBroker(Broker):
