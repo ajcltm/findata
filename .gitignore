@@ -7,6 +7,14 @@
 !/src/**
 !/notebook/
 !/notebook/**
+!/out/
+!/out/**
+!/reference/
+!/reference/**
+!/graph/
+!/graph/**
+!/llmwiki/
+!/llmwiki/**
 
 # --------------------------------------------------
 # 아래에 적어두신 Python 규칙들(__pycache__, .egg-info, *config*.py 등)에
@@ -151,7 +159,7 @@ pip-selfcheck.json
 ## Plugin-specific files:
 
 # IntelliJ
-/out/
+# /out/ 는 프로젝트 결과물 폴더로 쓰므로 제외하지 않는다
 
 # mpeltonen/sbt-idea plugin
 .idea_modules/
@@ -171,3 +179,14 @@ data/
 *.db
 *.json          # token.json 등 모든 JSON 인증 파일 제외
 **/*token*.json
+
+*.bak
+llmwiki/.cache/text/
+graph/run/
+graph/work/
+graph/.dashboard/inbox/
+graph/.dashboard/last.md
+graph/.dashboard/session.json
+graph/.dashboard/last_prompt.json
+graph/.dashboard/doc_times.json
+graph/.dashboard/.build.lock

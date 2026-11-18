@@ -1,0 +1,666 @@
+{
+  "generated": "2026-11-18T17:24:48",
+  "reqs": {
+    "REQ-001": {
+      "title": "코드 이해 설명서",
+      "status": "approved",
+      "supersedes": ""
+    },
+    "REQ-002": {
+      "title": "src 파일 재분류",
+      "status": "approved",
+      "supersedes": ""
+    },
+    "REQ-003": {
+      "title": "칼만필터 OFI 전략",
+      "status": "approved",
+      "supersedes": ""
+    }
+  },
+  "ucs": {
+    "UC-001": {
+      "title": "지정 대상 코드 설명서 만들기",
+      "status": "approved",
+      "from": [
+        "REQ-001"
+      ],
+      "actor": "사용자, worker",
+      "nodes": [
+        "N-001"
+      ]
+    },
+    "UC-002": {
+      "title": "src 코드 옮기기",
+      "status": "approved",
+      "from": [
+        "REQ-002"
+      ],
+      "actor": "사용자, worker",
+      "nodes": [
+        "N-002",
+        "N-003"
+      ]
+    },
+    "UC-003": {
+      "title": "칼만 OFI 전략 한 사이클 발전",
+      "status": "approved",
+      "from": [
+        "REQ-003"
+      ],
+      "actor": "사용자, worker",
+      "nodes": [
+        "N-007",
+        "N-008",
+        "N-004",
+        "N-005",
+        "N-006"
+      ]
+    }
+  },
+  "nodes": {
+    "N-001": {
+      "title": "지정 대상 코드 설명서 작성",
+      "from": "UC-001",
+      "mode": "execute",
+      "status": "done",
+      "pre": [
+        {
+          "type": "input",
+          "ref": "대상과 모드 (스크립트 모드 또는 흐름 모드)"
+        }
+      ],
+      "deps": [],
+      "deps_fail": [],
+      "dependents": [],
+      "loop": null,
+      "do": "지정 대상 1개의 코드 설명서를 `code-flow-explainer` 스킬로 만든다. 기존 설명서가 있으면 바뀐 코드에 맞게 갱신한다",
+      "out": [
+        "out/code_docs/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "",
+        "ok": true,
+        "message": "결과물 승인 불필요"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 7
+    },
+    "N-002": {
+      "title": "src 재분류안 작성",
+      "from": "UC-002",
+      "mode": "execute",
+      "status": "done",
+      "pre": [
+        {
+          "type": "none",
+          "ref": ""
+        }
+      ],
+      "deps": [],
+      "deps_fail": [],
+      "dependents": [
+        "N-003"
+      ],
+      "loop": null,
+      "do": "`src/`의 분류를 진단하고 새 폴더 구조와 옮길 목록을 만든다",
+      "out": [
+        "out/refactor/src_재분류안.md"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "granted (2026-11-16, 607cb3d49f28)",
+        "ok": true,
+        "message": "결과물 승인됨"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 24
+    },
+    "N-003": {
+      "title": "src 코드 옮기기",
+      "from": "UC-002",
+      "mode": "build",
+      "status": "done",
+      "pre": [
+        {
+          "type": "node",
+          "ref": "N-002"
+        }
+      ],
+      "deps": [
+        "N-002"
+      ],
+      "deps_fail": [],
+      "dependents": [],
+      "loop": null,
+      "do": "승인한 재분류안대로 코드를 옮기고 import를 고친다",
+      "out": [
+        "src/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "",
+        "ok": true,
+        "message": "결과물 승인 불필요"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 36
+    },
+    "N-007": {
+      "title": "칼만 OFI 버전 성능 분석",
+      "from": "UC-003",
+      "mode": "execute",
+      "status": "done",
+      "pre": [
+        {
+          "type": "input",
+          "ref": "분석할 전략 버전"
+        }
+      ],
+      "deps": [],
+      "deps_fail": [],
+      "dependents": [
+        "N-008"
+      ],
+      "loop": null,
+      "do": "지정한 버전의 수집 데이터와 코드로 잡음과 추세 인식을 분석하고 분석서를 쓴다",
+      "out": [
+        "out/strategy_design/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "",
+        "ok": true,
+        "message": "결과물 승인 불필요"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 50
+    },
+    "N-008": {
+      "title": "칼만 OFI 설계 방향서",
+      "from": "UC-003",
+      "mode": "execute",
+      "status": "todo",
+      "pre": [
+        {
+          "type": "node",
+          "ref": "N-007"
+        },
+        {
+          "type": "input",
+          "ref": "전략 버전"
+        }
+      ],
+      "deps": [
+        "N-007"
+      ],
+      "deps_fail": [],
+      "dependents": [
+        "N-004"
+      ],
+      "loop": null,
+      "do": "분석서를 바탕으로 사용자와 설계방향을 논의하고 그 버전의 설계 방향서를 쓴다",
+      "out": [
+        "out/strategy_design/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "required",
+        "ok": false,
+        "message": "결과물 승인 대기"
+      },
+      "ready": true,
+      "file": "graph/nodes.md",
+      "line": 66
+    },
+    "N-004": {
+      "title": "칼만 OFI 전략 설계",
+      "from": "UC-003",
+      "mode": "execute",
+      "status": "todo",
+      "pre": [
+        {
+          "type": "node",
+          "ref": "N-008"
+        },
+        {
+          "type": "input",
+          "ref": "전략 버전"
+        }
+      ],
+      "deps": [
+        "N-008"
+      ],
+      "deps_fail": [],
+      "dependents": [
+        "N-005"
+      ],
+      "loop": null,
+      "do": "그 버전의 승인한 설계 방향서대로 전략과 지표를 md 설계서로 쓴다",
+      "out": [
+        "out/strategy_design/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "required",
+        "ok": false,
+        "message": "결과물 승인 대기"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 83
+    },
+    "N-005": {
+      "title": "칼만 OFI indicator 코드",
+      "from": "UC-003",
+      "mode": "build",
+      "status": "todo",
+      "pre": [
+        {
+          "type": "node",
+          "ref": "N-004"
+        },
+        {
+          "type": "input",
+          "ref": "전략 버전"
+        }
+      ],
+      "deps": [
+        "N-004"
+      ],
+      "deps_fail": [],
+      "dependents": [
+        "N-006"
+      ],
+      "loop": null,
+      "do": "그 버전의 승인한 설계서의 지표를 프로젝트 `Indicator` 인터페이스로 만든다",
+      "out": [
+        "src/alpha/indicators/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "",
+        "ok": true,
+        "message": "결과물 승인 불필요"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 102
+    },
+    "N-006": {
+      "title": "칼만 OFI strategy 코드",
+      "from": "UC-003",
+      "mode": "build",
+      "status": "todo",
+      "pre": [
+        {
+          "type": "node",
+          "ref": "N-005"
+        },
+        {
+          "type": "input",
+          "ref": "전략 버전"
+        }
+      ],
+      "deps": [
+        "N-005"
+      ],
+      "deps_fail": [],
+      "dependents": [],
+      "loop": {
+        "from": "N-007",
+        "max": 3,
+        "count": 0
+      },
+      "do": "그 버전의 승인한 설계서의 전략을 프로젝트 strategy 인터페이스로 만든다",
+      "out": [
+        "src/alpha/strategy/"
+      ],
+      "out_exists": true,
+      "verify": {
+        "kind": null,
+        "script": "",
+        "desc": ""
+      },
+      "check": {
+        "raw": "",
+        "ok": true,
+        "message": "검증은 검증 계획(VP)으로 한다"
+      },
+      "approval": {
+        "raw": "",
+        "ok": true,
+        "message": "승인 불필요"
+      },
+      "review": {
+        "raw": "",
+        "ok": true,
+        "message": "결과물 승인 불필요"
+      },
+      "ready": false,
+      "file": "graph/nodes.md",
+      "line": 118
+    }
+  },
+  "order": [
+    "N-001",
+    "N-002",
+    "N-003",
+    "N-007",
+    "N-008",
+    "N-004",
+    "N-005",
+    "N-006"
+  ],
+  "memos": [
+    {
+      "id": "MEMO-001",
+      "type": "request",
+      "status": "resolved",
+      "target": "N-001",
+      "cause": null,
+      "body": "대상은 `src/alpha/analysist/tdata.py` (Tdata 클래스)다. 사용자가 2026-11-14에 골랐다.",
+      "file": "graph/memos.md",
+      "line": 5
+    },
+    {
+      "id": "MEMO-002",
+      "type": "request",
+      "status": "resolved",
+      "target": "N-001",
+      "cause": null,
+      "body": "대상은 `src/alpha/engine/engine.py`다. 모드는 스크립트 모드다. 사용자가 2026-11-16에 골랐다 (IN-005).",
+      "file": "graph/memos.md",
+      "line": 9
+    },
+    {
+      "id": "MEMO-003",
+      "type": "failure",
+      "status": "open",
+      "target": "N-001",
+      "cause": "hook",
+      "body": "`guard_write.py`가 Bash 명령 안 문자열의 `>`와 `sed` 치환식을 쓰기 경로로 판정했다 (2회). worker는 파일을 Write·Edit 도구로만 쓰고 고친다. Bash로는 읽기와 스크립트 실행만 한다.",
+      "file": "graph/memos.md",
+      "line": 13
+    },
+    {
+      "id": "MEMO-004",
+      "type": "request",
+      "status": "resolved",
+      "target": "N-002",
+      "cause": null,
+      "body": "재분류안은 짧게 쓴다. 새 폴더 트리와 \"옛 위치 → 새 위치\" 표만 쓴다. 설명 글은 쓰지 않는다.",
+      "file": "graph/memos.md",
+      "line": 16
+    },
+    {
+      "id": "MEMO-005",
+      "type": "note",
+      "status": "archived",
+      "target": "N-003",
+      "cause": null,
+      "body": "함수 안 지연 import(`alphatrader.py` 491행, `recorder.py` 296행)도 새 경로로 고친다. `kis_broker.py`·`bt_broker.py`의 쓰지 않는 `Strategy`, `Trader` import는 지우지 않고 경로만 바꾼다.",
+      "file": "graph/memos.md",
+      "line": 20
+    },
+    {
+      "id": "MEMO-006",
+      "type": "note",
+      "status": "archived",
+      "target": "N-003",
+      "cause": null,
+      "body": "사용자가 커밋하지 않은 변경이 있다 (`src/alpha/indicators/kalman.py`, notebook 2개). 이 파일들은 고치지 않는다. 작업 브랜치는 `refactor/src-reclass`다. worker는 커밋하지 않는다.",
+      "file": "graph/memos.md",
+      "line": 24
+    },
+    {
+      "id": "MEMO-007",
+      "type": "request",
+      "status": "resolved",
+      "target": "N-001",
+      "cause": null,
+      "body": "`engine_코드설명서.md`의 경로와 줄 번호를 재분류 뒤 구조(커밋 `de85e88`)에 맞게 고친다. 예: `trading.py` → `core/orders.py`, `trader/trader.py`. 설명 내용은 다시 쓰지 않는다. 대상은 그대로 `engine.py`다.",
+      "file": "graph/memos.md",
+      "line": 28
+    },
+    {
+      "id": "MEMO-008",
+      "type": "request",
+      "status": "resolved",
+      "target": "N-001",
+      "cause": null,
+      "body": "`engine_코드설명서.md`의 줄 번호 오류 2곳을 고친다. (1) `apply_fill()` 설명이 `is_done` 줄(`core/orders.py:100`)을 가리킨다 → `apply_fill`(103행)과 FILLED를 정하는 줄(118–119행)로 고친다. (2) `view_q`에 넣는 코드라는 참조가 지표 목록 코드(`strategy/base.py:191-194`)를 가리킨다 → 실제로 `view_q`에 넣는 줄을 찾아 고친다. 찾으면 \"(추정)\"을 뗀다. 다른 내용은 바꾸지 않는다. hash:9f6784800b95",
+      "file": "graph/memos.md",
+      "line": 32
+    },
+    {
+      "id": "MEMO-009",
+      "type": "request",
+      "status": "open",
+      "target": "N-004",
+      "cause": null,
+      "body": "사용자가 2026-11-17에 요청했다 (IN-012, IN-013). 기존 M1은 현재 `kalman.py`에 너무 맞춰져 있다. 프로젝트 매니저가 사용자와 설계방향을 충분히 검토한 뒤 설계 방향서(`out/strategy_design/vN/kalman_ofi_direction.md`)를 만든다. N-004는 그 방향서를 입력으로 받는다.",
+      "file": "graph/memos.md",
+      "line": 36
+    },
+    {
+      "id": "MEMO-010",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: Bash의 `python`은 Windows 스토어 스텁이다. 실행하면 exit 49로 끝난다. `C:/Users/USER/AppData/Local/Programs/Python/Python312/python.exe` 전체 경로를 써야 한다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 40
+    },
+    {
+      "id": "MEMO-011",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: guard_write 훅은 Bash 명령 안의 셸 변수(`$A`)를 풀지 못한다. 그래서 허용된 경로도 막는다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 44
+    },
+    {
+      "id": "MEMO-012",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: 작업 폴더에 집계 스크립트 `index/work/N-007/summ.py`가 남아 있다. csv만 읽는 스크립트다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 48
+    },
+    {
+      "id": "MEMO-013",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: 앞 실행은 보고의 `막힘:` 칸 아래에 훅 차단 기록을 불릿으로 붙였다. 그래서 훅이 node를 todo로 되돌렸다. 결과물 자체에는 문제가 없었다. 앞으로 훅 차단 같은 참고 사항은 `남길 메모:`에 쓴다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 52
+    },
+    {
+      "id": "MEMO-014",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: 분석서 7절 재현 명령은 `python`을 쓴다. 이 PC의 Bash에서는 MEMO-010의 전체 경로를 써야 한다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 56
+    },
+    {
+      "id": "MEMO-015",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "프레임워크: 훅은 SubagentHandback 보고를 읽지 못하는 것으로 보인다. 훅은 마지막 텍스트 응답에서 칸을 읽는다. `framework-feedback/`에 기록할 거리다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 60
+    },
+    {
+      "id": "MEMO-016",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: v1 원본 9개 파일과 빈 폴더 `v1/analysis/`, `v1/`는 매니저가 절대 경로로 지웠다. 매니저는 지우기 전에 내용이 같음을 확인했다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 64
+    },
+    {
+      "id": "MEMO-017",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "앞서 내 `rm`은 상대 경로였다. 명령은 `cd .../out/strategy_design && rm v1/analysis/... && rmdir ...`였다. guard_write 훅이 이 명령을 막았다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 68
+    },
+    {
+      "id": "MEMO-018",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "훅 메시지 원문: \"v1/analysis/kalman_ofi_prev_analysis.md: N-007의 worker는 맡은 node의 결과물(out/strategy_design/)과 작업 폴더(index/work/N-007/)에만 쓴다. 우회하지 말고 멈춘 뒤 '막힘'으로 보고한다.\"\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 72
+    },
+    {
+      "id": "MEMO-019",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "N-007: v0의 `ic.csv`, `diag.csv`는 줄 끝이 LF다. 원본은 CRLF였다. 다시 만든 csv와 비교할 때는 `diff --strip-trailing-cr`를 쓴다. `cmp`는 다르다고 판정한다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 76
+    },
+    {
+      "id": "MEMO-020",
+      "type": "note",
+      "status": "open",
+      "target": "N-007",
+      "cause": null,
+      "body": "프레임워크: guard_write 훅이 `cd` 뒤의 상대 경로를 허용 경로로 알아보지 못하는 것 같다. 확인하지는 않았다. MEMO-011과 같은 종류의 문제다. `framework-feedback/`에 적을 거리다.\n(worker 보고에서 자동 기록)",
+      "file": "graph/memos.md",
+      "line": 80
+    }
+  ]
+}

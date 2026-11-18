@@ -1,0 +1,203 @@
+[
+  {
+    "where": "'유스케이스' 칸",
+    "node": null,
+    "kind": null,
+    "type": "text",
+    "summary": "설명 대상을 사용자가 지시하면 그때 노드를 하나 더 만들어서 문서를 만드는게 아님. 노드는 이미 사용자가 지시하는 대상을 스킬을 사용해서 만든다로 셋팅되어 있어야함. 사용자는 해당 노드를 설명을 원하는 대상을 넣어서 실행하면 되는 상황을 원함",
+    "id": "IN-001",
+    "time": "2026-11-14T14:31:35",
+    "status": "done",
+    "result": "UC-001 사전조건과 성공 흐름 수정: 재사용 node 1개에 대상을 넣어 실행",
+    "done": "2026-11-14T14:31:51"
+  },
+  {
+    "where": "업무 실행",
+    "node": null,
+    "nodes": [
+      "N-001"
+    ],
+    "kind": "업무",
+    "type": "run",
+    "summary": "업무 실행 요청: N-001 지정 대상 코드 설명서 작성 (이 node들을 업무 범위로 받아 /run 절차대로 범위 확정, 승인 확인, 업무 배분, 실행, 보고를 진행할 것)",
+    "id": "IN-002",
+    "time": "2026-11-14T14:54:08",
+    "status": "done",
+    "result": "N-001 완료: out/code_docs/engine_코드설명서.md",
+    "done": "2026-11-16T10:54:18"
+  },
+  {
+    "where": "'N-001 메모' 칸",
+    "node": "N-001",
+    "kind": null,
+    "type": "text",
+    "summary": "tdata.py",
+    "id": "IN-003",
+    "time": "2026-11-14T14:54:08",
+    "status": "done",
+    "result": "N-001 대상 지정. 사용자가 src/alpha/analysist/tdata.py를 골랐다. MEMO-001에 기록.",
+    "done": "2026-11-14T14:55:16"
+  },
+  {
+    "where": "업무 실행",
+    "node": null,
+    "nodes": [
+      "N-001"
+    ],
+    "kind": "업무",
+    "type": "run",
+    "summary": "업무 실행 요청: N-001 지정 대상 코드 설명서 작성 (이 node들을 업무 범위로 받아 /run 절차대로 범위 확정, 승인 확인, 업무 배분, 실행, 보고를 진행할 것)",
+    "id": "IN-004",
+    "time": "2026-11-16T10:41:07",
+    "status": "done",
+    "result": "N-001 완료: out/code_docs/engine_코드설명서.md (IN-002와 같은 요청)",
+    "done": "2026-11-16T10:54:18"
+  },
+  {
+    "where": "'N-001 메모' 칸",
+    "node": "N-001",
+    "kind": null,
+    "type": "text",
+    "summary": "대상: engine.py",
+    "id": "IN-005",
+    "time": "2026-11-16T10:41:07",
+    "status": "done",
+    "result": "N-001 대상을 src/alpha/engine/engine.py(스크립트 모드)로 기록. MEMO-002",
+    "done": "2026-11-16T10:42:57"
+  },
+  {
+    "where": "UC-002 칸",
+    "node": "UC-002",
+    "kind": "승인",
+    "type": "conditional",
+    "summary": "UC-002 승인 선택 + 사용자 글: 옛 위치를 가리키는 import가 `src/`에 0개다 이건 과한듯. 잘 모르겠네 있어야 할지. 목적만 달성해. 기능별로 코드 및 파일 재분류 (아직 기록하지 않음, 글을 확인·반영한 뒤 기록할 것)",
+    "id": "IN-006",
+    "time": "2026-11-16T11:58:56",
+    "status": "done",
+    "result": "UC-002 성공조건에서 '옛 import 0개'를 뺐다. UC-002 승인 기록",
+    "done": "2026-11-16T11:59:09"
+  },
+  {
+    "where": "N-002 칸",
+    "node": "N-002",
+    "kind": "승인",
+    "type": "blocked",
+    "summary": "N-002 승인 선택. 상위 UC-002가 아직 승인 전이라 보류",
+    "id": "IN-007",
+    "time": "2026-11-16T11:58:56",
+    "status": "done",
+    "result": "UC-002 승인 뒤 N-002 승인 기록",
+    "done": "2026-11-16T11:59:09"
+  },
+  {
+    "where": "N-003 칸",
+    "node": "N-003",
+    "kind": "승인",
+    "type": "blocked",
+    "summary": "N-003 승인 선택. 상위 UC-002가 아직 승인 전이라 보류",
+    "id": "IN-008",
+    "time": "2026-11-16T11:58:56",
+    "status": "done",
+    "result": "UC-002 승인 뒤 N-003 승인 기록",
+    "done": "2026-11-16T11:59:10"
+  },
+  {
+    "where": "N-002 칸",
+    "node": "N-002",
+    "kind": null,
+    "type": "text",
+    "summary": "core에 있는 records.py는 왜 recording에 분류가 안되지?",
+    "id": "IN-009",
+    "time": "2026-11-16T13:06:04",
+    "status": "done",
+    "result": "답변: 순환 없이 recording/records.py로 옮길 수 있다. 사용자 선택 대기",
+    "done": "2026-11-16T13:06:34"
+  },
+  {
+    "where": "'N-003 메모' 칸",
+    "node": "N-003",
+    "kind": null,
+    "type": "text",
+    "summary": "분류표대로 고친다를 할일로 표현한거야? 맞게 일을 구분한거야? 진짜 이거만하면 분류표대로 돼?",
+    "id": "IN-010",
+    "time": "2026-11-16T14:52:19",
+    "status": "done",
+    "result": "할 일을 표 행 번호에 맞춰 고쳤다. 빠진 2가지(KalmanTrend는 파일이 아니라 클래스, 빈 폴더 삭제)를 더했다",
+    "done": "2026-11-16T14:52:49"
+  },
+  {
+    "where": "업무 실행",
+    "node": null,
+    "nodes": [
+      "N-003"
+    ],
+    "kind": "업무",
+    "type": "run",
+    "summary": "업무 실행 요청: N-003 src 코드 옮기기 (이 node들을 업무 범위로 받아 /run 절차대로 범위 확정, 승인 확인, 업무 배분, 실행, 보고를 진행할 것)",
+    "id": "IN-011",
+    "time": "2026-11-16T14:57:11",
+    "status": "done",
+    "result": "N-003 완료: 표 19/19 이동, 커밋 de85e88 (브랜치 refactor/src-reclass)",
+    "done": "2026-11-16T15:10:55"
+  },
+  {
+    "where": "'유스케이스' 칸",
+    "node": null,
+    "kind": null,
+    "type": "text",
+    "summary": "M1 worker가 레퍼런스 문서와 현재 `kalman.py`를 읽는다는 너무 현재에 오버핏팅 되어 있잖아. 사용자와 충분한 토론을 거쳐서 설계방향 검토서를 만든다고 고쳐.",
+    "id": "IN-012",
+    "time": "2026-11-17T12:23:46",
+    "status": "done",
+    "result": "UC-003 M1·M2와 N-004를 설계 방향서 기준으로 고쳤다",
+    "done": "2026-11-17T12:26:09"
+  },
+  {
+    "where": "'유스케이스' 칸",
+    "node": null,
+    "kind": null,
+    "type": "text",
+    "summary": "m1은 너무 현재 상황에 오버핏팅. 사용자와 설계방향을 충분히 검토한뒤에 설계 방향서 문서를 만다로 고쳐.",
+    "id": "IN-013",
+    "time": "2026-11-17T12:25:33",
+    "status": "done",
+    "result": "IN-012와 같은 요청. 함께 반영했다",
+    "done": "2026-11-17T12:26:09"
+  },
+  {
+    "id": "IN-014",
+    "time": "2026-11-17T17:44:21",
+    "status": "done",
+    "where": "N-007 보고",
+    "node": "N-007",
+    "kind": "위키",
+    "type": "wiki",
+    "summary": "N-007에서 나온 지식: v0 `OFI_KF`의 `h`는 `MicrostructureWatcher`의 `kf_dd_lag`=3.0초다(`microstructure_watcher.py` L51, L87). 입력은 `BestQuoteFlow.ofi_norm`이다. / 10-23 `wf_med` 분포: 18종목 중 12종목이 0이다. 최대값은 0.027(005490)이다. / v0 분석 산출물 위치: `out/strategy_design/v1/analysis/` (분석서, 스크립트, `ic.csv`, `diag.csv`). (결정이면 바로, 그 밖의 지식은 범위 작업이 끝날 때 몰아서 /wiki ingest할 것)",
+    "result": "librarian ingest로 위키에 반영 중. 경로 v1/analysis는 틀려서 v0/analysis로 고쳐 맡김",
+    "done": "2026-11-18T13:08:58"
+  },
+  {
+    "id": "IN-015",
+    "time": "2026-11-17T17:45:42",
+    "status": "done",
+    "where": "N-007 보고",
+    "node": "N-007",
+    "kind": "위키",
+    "type": "wiki",
+    "summary": "N-007에서 나온 지식: 없음. 분석 내용은 [[synthesis/2026-11-17_001_칼만 OFI v0 성능 분석 (2026-10-23 mock 데이터)]]에 이미 있다. (결정이면 바로, 그 밖의 지식은 범위 작업이 끝날 때 몰아서 /wiki ingest할 것)",
+    "result": "새 지식 없음. synthesis 페이지에 이미 있음",
+    "done": "2026-11-18T13:08:58"
+  },
+  {
+    "id": "IN-016",
+    "time": "2026-11-17T18:34:17",
+    "status": "done",
+    "where": "N-007 보고",
+    "node": "N-007",
+    "kind": "위키",
+    "type": "wiki",
+    "summary": "N-007에서 나온 지식: v0 칼만 OFI 성능 분석서와 재현 스크립트는 `out/strategy_design/v0/analysis/`에 있다. / 분석서는 분석 대상 버전의 폴더에 둔다. / 위키 synthesis 페이지가 `v1/analysis` 경로를 가리키면 `v0/analysis`로 고친다. (결정이면 바로, 그 밖의 지식은 범위 작업이 끝날 때 몰아서 /wiki ingest할 것)",
+    "result": "librarian ingest로 위키에 반영 중. 위키에 v1/analysis 참조 없음 확인",
+    "done": "2026-11-18T13:08:58"
+  }
+]

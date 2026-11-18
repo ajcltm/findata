@@ -1,0 +1,72 @@
+[
+  {
+    "id": "Q-001",
+    "text": "N-001 첫 대상은 무엇입니까?",
+    "options": [
+      "engine.py 흐름",
+      "kalman.py 스크립트",
+      "직접 지정"
+    ],
+    "about": "",
+    "status": "closed",
+    "asked": "2026-11-14T14:51:16",
+    "result": "대화에서 답: src/alpha/engine/engine.py (IN-005)",
+    "closed": "2026-11-16T10:42:34"
+  },
+  {
+    "id": "Q-002",
+    "text": "N-001 대상 tdata.py가 두 개다. 어느 것인가?",
+    "options": [
+      "A) src/alpha/analysist/tdata.py (Tdata 클래스, 1396줄) — 추천",
+      "B) test/tdata.py (DataStore→indicators→plot 흐름 테스트, 19줄)"
+    ],
+    "about": "",
+    "status": "closed",
+    "asked": "2026-11-14T14:54:34",
+    "result": "무효: 대상이 engine.py로 바뀌었다",
+    "closed": "2026-11-16T10:42:34"
+  },
+  {
+    "id": "Q-003",
+    "text": "대상 (스크립트 1개 또는 흐름 1개)",
+    "options": [],
+    "about": "N-001",
+    "status": "closed",
+    "asked": "2026-11-14T14:55:30",
+    "closed": "2026-11-14T14:55:30",
+    "result": "대상 (스크립트 1개 또는 흐름 1개): src/alpha/analysist/tdata.py"
+  },
+  {
+    "id": "Q-004",
+    "text": "새 code-flow-explainer 스킬은 코드를 실행하지 않고 읽어서 값을 따라간다. REQ-001·UC-001·N-001의 '복사→스텁→실행' 방법을 새 스킬에 맞출까?",
+    "options": [
+      "A) 새 스킬에 맞춘다 (추천)",
+      "B) 그래프는 그대로 둔다"
+    ],
+    "about": "",
+    "status": "closed",
+    "asked": "2026-11-16T10:18:04",
+    "result": "대화에서 답: 맞춘다. REQ-001·UC-001·N-001은 이미 읽기 방식이다",
+    "closed": "2026-11-16T10:42:34"
+  },
+  {
+    "id": "Q-005",
+    "text": "사용자 입력",
+    "options": [],
+    "about": "N-001",
+    "status": "closed",
+    "asked": "2026-11-16T10:42:35",
+    "closed": "2026-11-16T10:42:35",
+    "result": "src/alpha/engine/engine.py, 스크립트 모드"
+  },
+  {
+    "id": "Q-006",
+    "text": "분석할 전략 버전",
+    "options": [],
+    "about": "N-007",
+    "status": "closed",
+    "asked": "2026-11-17T18:24:30",
+    "closed": "2026-11-17T18:24:30",
+    "result": "분석할 전략 버전: v0"
+  }
+]
